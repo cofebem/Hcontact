@@ -1,0 +1,69 @@
+\documentclass[10pt,aspectratio=169,professionalfonts]{beamer}
+\usetheme[progressbar=frametitle,block=fill,numbering=fraction]{metropolis}
+
+\usepackage{appendixnumberbeamer}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{siunitx}
+\usepackage{tikz}
+\usetikzlibrary{calc,arrows.meta,shapes,positioning,decorations.pathmorphing,patterns}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.17}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{array,multirow}
+
+%% ─── colours ────────────────────────────────────────────────────────────────
+\definecolor{mblue}{HTML}{2c7bb6}
+\definecolor{mred}{HTML}{d73027}
+\definecolor{mgreen}{HTML}{1a9850}
+\definecolor{morange}{HTML}{f46d43}
+\definecolor{mgray}{HTML}{aaaaaa}
+\definecolor{mdblue}{HTML}{08519c}
+\definecolor{mlblue}{HTML}{9ecae1}
+
+\setbeamercolor{palette primary}{bg=mblue,fg=white}
+\setbeamercolor{progress bar}{fg=mblue,bg=mlblue}
+\setbeamercolor{alerted text}{fg=mred}
+\setbeamercolor{block title alerted}{fg=white,bg=mred}
+
+%% ─── math shorthands ────────────────────────────────────────────────────────
+\newcommand{\Esta}{E^*}
+\newcommand{\pbar}{\bar{p}}
+\newcommand{\diag}{\mathrm{diam}}
+\newcommand{\dist}{\mathrm{dist}}
+\newcommand{\calL}{\mathcal{L}}
+\newcommand{\T}{\mathsf{T}}
+
+%% ─── tikz styles ────────────────────────────────────────────────────────────
+\tikzset{
+  leaf/.style={fill=mlblue!40,draw=mblue,rounded corners=1pt},
+  block lr/.style={fill=mlblue,opacity=0.6},
+  block d/.style={fill=mgray!50},
+  arr/.style={->,>=Stealth,thick,mblue},
+}
+
+%% ─── title info ─────────────────────────────────────────────────────────────
+\title{H-Matrix BEM for Rough-Surface\\Normal Contact}
+\subtitle{Non-periodic solver · Love element integration · Polonsky--Keer PCG}
+\author{V.~Yastrebov}
+\institute{MINES Paris -- PSL, Centre des Mat\'eriaux}
+\date{2026}
+
+\begin{document}
+
+\maketitle
+
+%% ── Section §1: H-matrix solver ─────────────────────────────────────────────
+\input{sections/hmatrix}
+
+%% ── Section §2: Hertz problem ───────────────────────────────────────────────
+\input{sections/hertz}
+
+%% ── Section §3: Rough surface contact ──────────────────────────────────────
+\input{sections/rough}
+
+%% ── Section §4: Performance ─────────────────────────────────────────────────
+\input{sections/performance}
+
+\end{document}
