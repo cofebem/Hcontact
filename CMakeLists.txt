@@ -19,6 +19,7 @@ find_package(OpenMP)
 
 add_library(hmatrix_contact_core STATIC
   src/boussinesq_kernel.cpp
+  src/cluster_tree.cpp
 )
 target_include_directories(hmatrix_contact_core PUBLIC include)
 target_link_libraries(hmatrix_contact_core PUBLIC Eigen3::Eigen)
@@ -29,7 +30,7 @@ if(OpenMP_CXX_FOUND)
 endif()
 
 enable_testing()
-foreach(t kernel)
+foreach(t kernel hmatrix)
   add_executable(test_${t} tests/test_${t}.cpp)
   target_link_libraries(test_${t} PRIVATE hmatrix_contact_core)
   target_compile_options(test_${t} PRIVATE -Wall -Wextra)
