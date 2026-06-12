@@ -54,104 +54,104 @@ Design decisions locked in:
 
 **Files:** `CMakeLists.txt`, `include/boussinesq_kernel.hpp`, `src/boussinesq_kernel.cpp`, `tests/test_kernel.cpp`
 
-- [ ] Write `boussinesq_kernel.{hpp,cpp}`: free function
+- [x] Write `boussinesq_kernel.{hpp,cpp}`: free function
   `double love_uz(double x, double y, double a, double b)` implementing spec eq. L(x,y,a,b)
   (4 log terms with R±± = sqrt((x±a)²+(y±b)²)); class `BoussinesqKernel(Ns, L, E_star)`
   precomputing `table[dy*Ns+dx] = love_uz(dx*h, dy*h, h/2, h/2)/(π E*)`, with
   `entry(i,j)` = table lookup and `assemble_dense()` helper.
-- [ ] Write `tests/test_kernel.cpp`:
+- [x] Write `tests/test_kernel.cpp`:
   - self-term: `entry(i,i) == 4h·ln(1+√2)/(π E*)` to 1e-14 rel
   - symmetry: `entry(i,j) == entry(j,i)` for random pairs
   - far field: `|entry/point_source − 1| < 0.002` at r ≥ 5h; ≈3.7% at r=h (sanity of spec claim)
   - positivity and monotone decay along a row
-- [ ] Write `CMakeLists.txt`: C++17, `-O3 -march=native -Wall -Wextra`, appends
+- [x] Write `CMakeLists.txt`: C++17, `-O3 -march=native -Wall -Wextra`, appends
   `$ENV{CONDA_PREFIX}` to `CMAKE_PREFIX_PATH`, `find_package(Eigen3 REQUIRED)`,
   `find_package(OpenMP)`, `find_package(pybind11)` (QUIET at this stage), static lib
   `hmatrix_contact_core`, `enable_testing()`, test exe + `add_test`.
-- [ ] Configure + build + `ctest` green:
+- [x] Configure + build + `ctest` green:
   `cmake -S Hcontact -B Hcontact/build -DCMAKE_BUILD_TYPE=Release` (inside fenicsx-env)
-- [ ] Commit `feat(hcontact): Boussinesq Love kernel + tests`
+- [x] Commit `feat(hcontact): Boussinesq Love kernel + tests`
 
 ### Task 2: Quad-tree cluster tree
 
 **Files:** `include/cluster_tree.hpp`, `src/cluster_tree.cpp`, asserts appended to `tests/test_hmatrix.cpp` (tree-only part first)
 
-- [ ] `ClusterTree(Ns, leaf_size)`: nodes `{begin,end, box{ix0,ix1,iy0,iy1}, children[4]}` over
+- [x] `ClusterTree(Ns, leaf_size)`: nodes `{begin,end, box{ix0,ix1,iy0,iy1}, children[4]}` over
   index space; recursive midpoint split (skip empty quadrants); permutation arrays
   `perm` / `iperm`; `diam()` and `dist()` in Chebyshev index-metric scaled by h.
-- [ ] Test: perm is a permutation of 0..N-1; leaves ≤ leaf_size; leaf boxes tile the grid;
+- [x] Test: perm is a permutation of 0..N-1; leaves ≤ leaf_size; leaf boxes tile the grid;
   child ranges partition parent range.
-- [ ] Build + run, commit `feat(hcontact): quad-tree cluster tree`
+- [x] Build + run, commit `feat(hcontact): quad-tree cluster tree`
 
 ### Task 3: H-matrix (admissibility + ACA + matvec) vs dense
 
 **Files:** `include/hmatrix.hpp`, `src/hmatrix.cpp`, `tests/test_hmatrix.cpp`
 
-- [ ] `HMatrix(kernel, tree, eta, aca_tol)`: recursive block partition; admissible
+- [x] `HMatrix(kernel, tree, eta, aca_tol)`: recursive block partition; admissible
   (`min(diam) ≤ η·dist`, dist>0) → ACA block (U,V); both-leaves → dense block; else recurse.
   ACA as locked in above. Store blocks in flat `std::vector<Block>`.
-- [ ] `matvec(p)`: permute → per-block GEMV (`U*(V*x)` for low-rank) → inverse permute.
+- [x] `matvec(p)`: permute → per-block GEMV (`U*(V*x)` for low-rank) → inverse permute.
   Serial first; OpenMP comes in Task 6.
-- [ ] `info()`: counts, ranks, compressed bytes vs `8N²` dense bytes → compression ratio.
-- [ ] Test (Ns=64, N=4096): rel. L2 error `‖Hp − Sp‖/‖Sp‖ < 1e-5` for 5 random vectors at
+- [x] `info()`: counts, ranks, compressed bytes vs `8N²` dense bytes → compression ratio.
+- [x] Test (Ns=64, N=4096): rel. L2 error `‖Hp − Sp‖/‖Sp‖ < 1e-5` for 5 random vectors at
   `aca_tol=1e-6`; compression ratio < 0.35; also Ns=32 exactness when eta makes all dense.
-- [ ] Build + run, commit `feat(hcontact): ACA H-matrix with verified matvec`
+- [x] Build + run, commit `feat(hcontact): ACA H-matrix with verified matvec`
 
 ### Task 4: Polonsky–Keer PCG contact solver + Hertz test
 
 **Files:** `include/contact_solver.hpp`, `src/contact_solver.cpp`, `tests/test_contact.cpp`
 
-- [ ] `LinearOperator` interface (dense | hmatrix). `solve_contact(op, g0, p_bar, tol, max_iter)`
+- [x] `LinearOperator` interface (dense | hmatrix). `solve_contact(op, g0, p_bar, tol, max_iter)`
   implementing P&K: contact set `p>0`, gap shift by contact mean, conjugation factor `δ·G/G_old`
   (δ=0 when overlap correction fired), line search `τ = Σ g t / Σ r t`, projection `p≥0`,
   overlap correction, normalization `p *= p̄N/Σp`, error `Σ p|g| / (N p̄ · g_scale)`.
-- [ ] `ContactResult{pressure, displacement, objective W = ½pᵀu + pᵀg0, iterations, error,
+- [x] `ContactResult{pressure, displacement, objective W = ½pᵀu + pᵀg0, iterations, error,
   contact_fraction, mean_pressure}`.
-- [ ] Hertz test (Ns=64, L=1, E*=1, R=2, p̄ chosen so contact diameter ≈ L/3):
+- [x] Hertz test (Ns=64, L=1, E*=1, R=2, p̄ chosen so contact diameter ≈ L/3):
   `a_num` from contact area vs `a = (3FR/(4E*))^(1/3)` within 5%; `p_max` vs
   `p0 = 3F/(2πa²)` within 5%; mean pressure == p̄ to 1e-10; complementarity residual small.
   Run with both dense and H-matrix operators, fields agree < 1e-4 rel L2.
-- [ ] Build + run, commit `feat(hcontact): Polonsky-Keer PCG solver, Hertz validated`
+- [x] Build + run, commit `feat(hcontact): Polonsky-Keer PCG solver, Hertz validated`
 
 ### Task 5: pybind11 bindings
 
 **Files:** `python/bindings.cpp`, CMake additions
 
-- [ ] Module `hmatrix_contact`: `ContactSolver(grid_size, domain_size, E_star, eta, aca_tol,
+- [x] Module `hmatrix_contact`: `ContactSolver(grid_size, domain_size, E_star, eta, aca_tol,
   leaf_size)` (+kwarg `use_hmatrix=True`), `.matvec(np 1D/2D)`, `.solve(gap, p_nominal, tol,
   max_iter) -> ContactResult` with `(Ns,Ns)` numpy `pressure`/`displacement`, scalars
   `objective`, `contact_area`, `mean_pressure`, `iterations`, `error`; `.hmatrix_info()`.
-- [ ] CMake: `pybind11 REQUIRED` with documented `-Dpybind11_DIR`, module output dir
+- [x] CMake: `pybind11 REQUIRED` with documented `-Dpybind11_DIR`, module output dir
   `${CMAKE_SOURCE_DIR}/python`.
-- [ ] Smoke test from fenicsx-env python: matvec vs kernel dense via numpy; tiny solve runs.
-- [ ] Commit `feat(hcontact): pybind11 module hmatrix_contact`
+- [x] Smoke test from fenicsx-env python: matvec vs kernel dense via numpy; tiny solve runs.
+- [x] Commit `feat(hcontact): pybind11 module hmatrix_contact`
 
 ### Task 6: OpenMP matvec + diagnostics polish
 
-- [ ] Parallelize block loop: `#pragma omp parallel` with thread-local accumulator, reduce.
+- [x] Parallelize block loop: `#pragma omp parallel` with thread-local accumulator, reduce.
   Re-run test_hmatrix + timing print (matvec µs dense vs H).
-- [ ] Commit `perf(hcontact): OpenMP H-matvec`
+- [x] Commit `perf(hcontact): OpenMP H-matvec`
 
 ### Task 7: compare_tamaas.py
 
 **Files:** `tamaas_reference.py`, `compare_tamaas.py`
 
-- [ ] `tamaas_reference.py` (runs under fluidpaper): builds the spec's self-affine surface
+- [x] `tamaas_reference.py` (runs under fluidpaper): builds the spec's self-affine surface
   (n=64, hurst=0.8, k0=1,k1=4,k2=32, seed=12345, rms slope 1), non-periodic dcfft model,
   PolonskyKeerRey at p̄=0.05, saves `surface.npy`, `tamaas_pressure.npy`,
   `tamaas_meta.json` (timings, contact fraction).
-- [ ] `compare_tamaas.py` (runs under fenicsx-env): invokes
+- [x] `compare_tamaas.py` (runs under fenicsx-env): invokes
   `conda run -n fluidpaper python tamaas_reference.py` (skips if outputs fresh), runs
   hmatrix_contact on same surface/pressure, reports contact fractions, mean-pressure errors,
   rel-L2 pressure diff, assembly/matvec/solve wall times, compression ratio.
   Asserts: rel-L2 < 2%, |Δ contact fraction| < 0.01.
-- [ ] Run it; iterate until asserts pass. Commit `feat(hcontact): Tamaas comparison benchmark`
+- [x] Run it; iterate until asserts pass. Commit `feat(hcontact): Tamaas comparison benchmark`
 
 ### Task 8: README + final verification
 
-- [ ] `README.md`: 2–3 build commands, example usage (spec §Python Interface), test & benchmark
+- [x] `README.md`: 2–3 build commands, example usage (spec §Python Interface), test & benchmark
   instructions, known env facts (pybind11 via dolfinx-010).
-- [ ] Full clean rebuild, `ctest`, python smoke, compare_tamaas — all green; verify spec
+- [x] Full clean rebuild, `ctest`, python smoke, compare_tamaas — all green; verify spec
   Deliverables Checklist; commit `docs(hcontact): README + final validation`.
 
 ---
