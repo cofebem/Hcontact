@@ -8,7 +8,15 @@ namespace hmc {
 HMatrix::HMatrix(const BoussinesqKernel& kernel, const ClusterTree& tree,
                  double eta, double aca_tol)
     : kernel_(&kernel), tree_(&tree), eta_(eta), tol_(aca_tol) {
-    build(tree.root(), tree.root());
+    build(tree.root(), tree.root()); // partition only: collects empty blocks
+    const int nb = static_cast<int>(blocks_.size());
+#pragma omp parallel for schedule(dynamic, 4)
+    for (int bi = 0; bi < nb; ++bi) {
+        if (blocks_[bi].dense)
+            fill_dense(blocks_[bi]);
+        else
+            fill_aca(blocks_[bi]);
+    }
 }
 
 void HMatrix::build(int t, int s) {
@@ -18,17 +26,13 @@ void HMatrix::build(int t, int s) {
     const int dmin = std::min(ClusterTree::diam(nt.box), ClusterTree::diam(ns.box));
 
     if (d > 0 && dmin <= eta_ * d) {
-        HBlock blk{nt.begin, nt.end - nt.begin, ns.begin, ns.end - ns.begin,
-                   false, {}, {}, {}};
-        fill_aca(blk);
-        blocks_.push_back(std::move(blk));
+        blocks_.push_back({nt.begin, nt.end - nt.begin, ns.begin,
+                           ns.end - ns.begin, false, {}, {}, {}});
         return;
     }
     if (nt.leaf && ns.leaf) {
-        HBlock blk{nt.begin, nt.end - nt.begin, ns.begin, ns.end - ns.begin,
-                   true, {}, {}, {}};
-        fill_dense(blk);
-        blocks_.push_back(std::move(blk));
+        blocks_.push_back({nt.begin, nt.end - nt.begin, ns.begin,
+                           ns.end - ns.begin, true, {}, {}, {}});
         return;
     }
     if (nt.leaf) {
@@ -117,13 +121,22 @@ Eigen::VectorXd HMatrix::matvec(const Eigen::VectorXd& p) const {
     Eigen::VectorXd pt(N), ut = Eigen::VectorXd::Zero(N);
     for (int pos = 0; pos < N; ++pos) pt(pos) = p(tree_->perm()[pos]);
 
-    for (const auto& b : blocks_) {
-        const auto x = pt.segment(b.col_begin, b.col_size);
-        auto y = ut.segment(b.row_begin, b.row_size);
-        if (b.dense)
-            y.noalias() += b.D * x;
-        else
-            y.noalias() += b.U * (b.V * x);
+    const int nb = static_cast<int>(blocks_.size());
+#pragma omp parallel
+    {
+        Eigen::VectorXd local = Eigen::VectorXd::Zero(N);
+#pragma omp for schedule(dynamic, 8) nowait
+        for (int bi = 0; bi < nb; ++bi) {
+            const HBlock& b = blocks_[bi];
+            const auto x = pt.segment(b.col_begin, b.col_size);
+            auto y = local.segment(b.row_begin, b.row_size);
+            if (b.dense)
+                y.noalias() += b.D * x;
+            else
+                y.noalias() += b.U * (b.V * x);
+        }
+#pragma omp critical
+        ut += local;
     }
 
     Eigen::VectorXd u(N);
