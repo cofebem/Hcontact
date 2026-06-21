@@ -34,9 +34,13 @@ class HMatrix {
 public:
     // use_acagp=true: ACA with geometric pivot selection (Yastrebov 2025).
     // central_fraction: relative radius of central subset (fraction of cluster diameter).
+    // inline_svd_tol > 0: apply truncated SVD recompression block-by-block right after
+    //   ACA fill, keeping peak memory at (one block uncompressed + all previous compressed).
+    //   Enables Ns=1024 without first accumulating the full uncompressed matrix.
     HMatrix(const BoussinesqKernel& kernel, const ClusterTree& tree,
             double eta, double aca_tol,
-            bool use_acagp = false, double central_fraction = 0.3);
+            bool use_acagp = false, double central_fraction = 0.3,
+            double inline_svd_tol = 0.0);
 
     Eigen::VectorXd matvec(const Eigen::VectorXd& p) const;
     HMatrixInfo info() const;
@@ -51,6 +55,7 @@ private:
     void fill_dense(HBlock& blk) const;
     void fill_aca(HBlock& blk) const;
     void fill_aca_gp(HBlock& blk) const;
+    static void recompress_block(HBlock& blk, double svd_tol);
     double entry_perm(int pi, int pj) const {
         return kernel_->entry(tree_->perm()[pi], tree_->perm()[pj]);
     }
@@ -60,6 +65,7 @@ private:
     double eta_, tol_;
     bool use_acagp_;
     double central_fraction_;
+    double inline_svd_tol_;
     std::vector<HBlock> blocks_;
 };
 

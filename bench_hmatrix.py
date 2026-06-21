@@ -64,22 +64,23 @@ def self_affine_surface(Ns, hurst=0.8, k1=1, k2=None, seed=42):
     if rms_slope > 0:
         surface /= rms_slope
 
-    # Shift so highest asperity is at zero (gap convention: gap <= 0 in contact)
-    surface -= surface.max()
-    return surface.ravel()
+    # Gap convention: gap=0 at the highest asperity (contacts first),
+    # gap>0 at valleys (same convention as Hertz: gap >= 0 everywhere).
+    return (surface.max() - surface).ravel()
 
 
 # ──────────────────────────────────────────────────────────────
 # Benchmark runner
 # ──────────────────────────────────────────────────────────────
 def run_one(Ns, gap0, p_bar, label,
-            use_acagp=False, svd_tol=None,
+            use_acagp=False, svd_tol=None, inline_svd_tol=0.0,
             aca_tol=1e-6, tol_solve=1e-8, max_iter=5000):
     t0 = time.perf_counter()
     solver = hc.ContactSolver(
         grid_size=Ns, domain_size=1.0, E_star=1.0,
         eta=2.0, aca_tol=aca_tol, leaf_size=64,
         use_hmatrix=True, use_acagp=use_acagp,
+        inline_svd_tol=inline_svd_tol,
     )
     t_build = (time.perf_counter() - t0) * 1e3
     info_raw = solver.hmatrix_info()
@@ -109,7 +110,7 @@ def run_one(Ns, gap0, p_bar, label,
         "iters":      res.iterations,
         "err":        res.error,
         "conv":       res.converged,
-        "contact":    res.contact_fraction,
+        "contact":    res.contact_area,
         "mean_p":     res.mean_pressure,
     }
 
@@ -157,11 +158,13 @@ def main():
     sizes = [ns for ns in [128, 256, 512, 1024] if ns <= args.max_ns]
     P_BAR = 0.05
 
+    # (label, use_acagp, post_svd_tol, inline_svd_tol)
     configs = [
-        ("ACA  leaf=64",          False, None),
-        ("ACA  leaf=64 +SVD0.01", False, 0.01),
-        ("ACA  leaf=64 +SVD0.05", False, 0.05),
-        ("ACA-GP leaf=64",        True,  None),
+        ("ACA  leaf=64",              False, None,  0.0),
+        ("ACA  leaf=64 +SVD0.01",     False, 0.01,  0.0),
+        ("ACA  leaf=64 +SVD0.05",     False, 0.05,  0.0),
+        ("ACA-GP leaf=64",            True,  None,  0.0),
+        ("ACA  inline_SVD0.01",       False, None,  0.01),
     ]
 
     # ── Hertz benchmark ──────────────────────────────────────
@@ -170,10 +173,11 @@ def main():
     for Ns in sizes:
         g0 = hertz_gap(Ns)
         tol = args.hertz_tol if Ns <= 256 else 1e-6  # relax for large Ns
-        for label, use_gp, svd_tol in configs:
+        for label, use_gp, svd_tol, isvd in configs:
             try:
                 r = run_one(Ns, g0, P_BAR, label,
-                            use_acagp=use_gp, svd_tol=svd_tol, tol_solve=tol)
+                            use_acagp=use_gp, svd_tol=svd_tol,
+                            inline_svd_tol=isvd, tol_solve=tol)
                 hertz_rows.append(r)
                 print(f"  Ns={Ns:4d} {label}  iters={r['iters']}  err={r['err']:.2e}  "
                       f"MiB={r['mem_mib']:.1f}  {'OK' if r['conv'] else 'FAIL'}")
@@ -190,10 +194,11 @@ def main():
     for Ns in sizes:
         gap_rough = self_affine_surface(Ns, hurst=0.8, seed=42)
         tol = args.rough_tol if Ns <= 256 else 1e-6
-        for label, use_gp, svd_tol in configs:
+        for label, use_gp, svd_tol, isvd in configs:
             try:
                 r = run_one(Ns, gap_rough, P_BAR, label,
-                            use_acagp=use_gp, svd_tol=svd_tol, tol_solve=tol)
+                            use_acagp=use_gp, svd_tol=svd_tol,
+                            inline_svd_tol=isvd, tol_solve=tol)
                 rough_rows.append(r)
                 print(f"  Ns={Ns:4d} {label}  iters={r['iters']}  Ac/A={r['contact']:.4f}  "
                       f"MiB={r['mem_mib']:.1f}  {'OK' if r['conv'] else 'FAIL'}")

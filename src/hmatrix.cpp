@@ -41,19 +41,25 @@ double dist_to_circle(double x, double y, const Circle& c) {
 // ──────────────────────────────────────────────────────────────
 HMatrix::HMatrix(const BoussinesqKernel& kernel, const ClusterTree& tree,
                  double eta, double aca_tol,
-                 bool use_acagp, double central_fraction)
+                 bool use_acagp, double central_fraction, double inline_svd_tol)
     : kernel_(&kernel), tree_(&tree), eta_(eta), tol_(aca_tol),
-      use_acagp_(use_acagp), central_fraction_(central_fraction) {
+      use_acagp_(use_acagp), central_fraction_(central_fraction),
+      inline_svd_tol_(inline_svd_tol) {
     build(tree.root(), tree.root());
     const int nb = static_cast<int>(blocks_.size());
 #pragma omp parallel for schedule(dynamic, 4)
     for (int bi = 0; bi < nb; ++bi) {
-        if (blocks_[bi].dense)
-            fill_dense(blocks_[bi]);
+        HBlock& blk = blocks_[bi];
+        if (blk.dense)
+            fill_dense(blk);
         else if (use_acagp_)
-            fill_aca_gp(blocks_[bi]);
+            fill_aca_gp(blk);
         else
-            fill_aca(blocks_[bi]);
+            fill_aca(blk);
+        // Inline SVD recompression: truncate immediately after fill to keep
+        // peak memory at O(one block) rather than O(all blocks at full rank).
+        if (inline_svd_tol_ > 0.0 && !blk.dense)
+            recompress_block(blk, inline_svd_tol_);
     }
 }
 
@@ -486,54 +492,56 @@ Eigen::VectorXd HMatrix::matvec(const Eigen::VectorXd& p) const {
 }
 
 // ──────────────────────────────────────────────────────────────
-// Truncated SVD recompression
-// For each low-rank block U (m×k), V (k×n):
+// Truncated SVD recompression of a single low-rank block U (m×k), V (k×n):
 //   QR(U) = Qu Ru,  QR(V^T) = Qv Rv
 //   SVD(Ru Rv^T) = P Σ W^T  (k×k)
 //   Keep r terms where σ_r >= svd_tol * σ_0
 //   U_new = Qu P_r diag(σ_r)^{1/2},  V_new = diag(σ_r)^{1/2} W_r^T Qv^T
-// Cost: O(k²(m+n)) — negligible compared to ACA fill.
+// Cost: O(k²(m+n)).
 // ──────────────────────────────────────────────────────────────
+void HMatrix::recompress_block(HBlock& blk, double svd_tol) {
+    if (blk.dense) return;
+    const int k0 = static_cast<int>(blk.U.cols());
+    if (k0 <= 1) return;
+    const int m = blk.row_size, n = blk.col_size;
+
+    // Economy QR of U (m×k0): U = Qu Ru
+    Eigen::HouseholderQR<Eigen::MatrixXd> qru(blk.U);
+    Eigen::MatrixXd Qu = (qru.householderQ() *
+                          Eigen::MatrixXd::Identity(m, k0)).eval();
+    Eigen::MatrixXd Ru = qru.matrixQR().topRows(k0).eval();
+    Ru.template triangularView<Eigen::StrictlyLower>().setZero();
+
+    // Economy QR of V^T (n×k0): V^T = Qv Rv
+    Eigen::MatrixXd Vt = blk.V.transpose();  // n×k0
+    Eigen::HouseholderQR<Eigen::MatrixXd> qrv(Vt);
+    Eigen::MatrixXd Qv = (qrv.householderQ() *
+                          Eigen::MatrixXd::Identity(n, k0)).eval();
+    Eigen::MatrixXd Rv = qrv.matrixQR().topRows(k0).eval();
+    Rv.template triangularView<Eigen::StrictlyLower>().setZero();
+
+    // SVD of k0×k0 product Ru Rv^T
+    Eigen::JacobiSVD<Eigen::MatrixXd> svd(
+        (Ru * Rv.transpose()).eval(),
+        Eigen::ComputeThinU | Eigen::ComputeThinV);
+    const Eigen::VectorXd& sigma = svd.singularValues();
+
+    // Determine truncation rank
+    int r = k0;
+    if (sigma(0) > 0.0)
+        for (int i = 1; i < k0; ++i)
+            if (sigma(i) < svd_tol * sigma(0)) { r = i; break; }
+    if (r >= k0) return;  // no compression needed
+
+    // New factors: U_new = Qu * P_r * diag(sqrt σ), V_new = diag(sqrt σ) * W_r^T * Qv^T
+    const Eigen::VectorXd sq = sigma.head(r).cwiseSqrt();
+    blk.U = Qu * svd.matrixU().leftCols(r) * sq.asDiagonal();
+    blk.V = sq.asDiagonal() * svd.matrixV().leftCols(r).transpose() * Qv.transpose();
+}
+
 void HMatrix::recompress(double svd_tol) {
-    for (auto& blk : blocks_) {
-        if (blk.dense) continue;
-        const int k0 = static_cast<int>(blk.U.cols());
-        if (k0 <= 1) continue;
-        const int m = blk.row_size, n = blk.col_size;
-
-        // Economy QR of U (m×k0): U = Qu Ru
-        Eigen::HouseholderQR<Eigen::MatrixXd> qru(blk.U);
-        Eigen::MatrixXd Qu = (qru.householderQ() *
-                              Eigen::MatrixXd::Identity(m, k0)).eval();
-        Eigen::MatrixXd Ru = qru.matrixQR().topRows(k0).eval();
-        Ru.template triangularView<Eigen::StrictlyLower>().setZero();
-
-        // Economy QR of V^T (n×k0): V^T = Qv Rv
-        Eigen::MatrixXd Vt = blk.V.transpose();  // n×k0
-        Eigen::HouseholderQR<Eigen::MatrixXd> qrv(Vt);
-        Eigen::MatrixXd Qv = (qrv.householderQ() *
-                              Eigen::MatrixXd::Identity(n, k0)).eval();
-        Eigen::MatrixXd Rv = qrv.matrixQR().topRows(k0).eval();
-        Rv.template triangularView<Eigen::StrictlyLower>().setZero();
-
-        // SVD of k0×k0 product Ru Rv^T
-        Eigen::JacobiSVD<Eigen::MatrixXd> svd(
-            (Ru * Rv.transpose()).eval(),
-            Eigen::ComputeThinU | Eigen::ComputeThinV);
-        const Eigen::VectorXd& sigma = svd.singularValues();
-
-        // Determine truncation rank
-        int r = k0;
-        if (sigma(0) > 0.0)
-            for (int i = 1; i < k0; ++i)
-                if (sigma(i) < svd_tol * sigma(0)) { r = i; break; }
-        if (r >= k0) continue;  // no compression
-
-        // New factors: U_new = Qu * P_r * diag(sqrt σ), V_new = diag(sqrt σ) * W_r^T * Qv^T
-        const Eigen::VectorXd sq = sigma.head(r).cwiseSqrt();
-        blk.U = Qu * svd.matrixU().leftCols(r) * sq.asDiagonal();
-        blk.V = sq.asDiagonal() * svd.matrixV().leftCols(r).transpose() * Qv.transpose();
-    }
+    for (auto& blk : blocks_)
+        recompress_block(blk, svd_tol);
 }
 
 // ──────────────────────────────────────────────────────────────

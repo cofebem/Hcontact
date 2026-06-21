@@ -44,12 +44,13 @@ class PyContactSolver {
 public:
     PyContactSolver(int grid_size, double domain_size, double E_star, double eta,
                     double aca_tol, int leaf_size, bool use_hmatrix,
-                    bool use_acagp, double central_fraction)
+                    bool use_acagp, double central_fraction, double inline_svd_tol)
         : kernel_(grid_size, domain_size, E_star), use_h_(use_hmatrix) {
         if (use_h_) {
             tree_ = std::make_unique<hmc::ClusterTree>(grid_size, leaf_size);
             hmat_ = std::make_unique<hmc::HMatrix>(
-                kernel_, *tree_, eta, aca_tol, use_acagp, central_fraction);
+                kernel_, *tree_, eta, aca_tol, use_acagp, central_fraction,
+                inline_svd_tol);
         } else {
             dense_ = kernel_.assemble_dense();
         }
@@ -176,13 +177,14 @@ PYBIND11_MODULE(hmatrix_contact, m) {
         });
 
     py::class_<PyContactSolver>(m, "ContactSolver")
-        .def(py::init<int, double, double, double, double, int, bool, bool, double>(),
+        .def(py::init<int, double, double, double, double, int, bool, bool, double, double>(),
              py::arg("grid_size"), py::arg("domain_size") = 1.0,
              py::arg("E_star") = 1.0, py::arg("eta") = 2.0,
              py::arg("aca_tol") = 1e-6, py::arg("leaf_size") = 64,
              py::arg("use_hmatrix") = true,
              py::arg("use_acagp") = false,
-             py::arg("central_fraction") = 0.3)
+             py::arg("central_fraction") = 0.3,
+             py::arg("inline_svd_tol") = 0.0)
         .def("matvec", &PyContactSolver::matvec, py::arg("p"),
              "Influence-matrix product u = S p; accepts shape (N,) or (Ns, Ns)")
         .def("solve", &PyContactSolver::solve, py::arg("gap"),
