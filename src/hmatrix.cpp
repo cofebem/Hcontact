@@ -5,6 +5,10 @@
 #include <random>
 #include <sstream>
 
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
+
 namespace hmc {
 
 // ──────────────────────────────────────────────────────────────
@@ -46,6 +50,16 @@ HMatrix::HMatrix(const BoussinesqKernel& kernel, const ClusterTree& tree,
       use_acagp_(use_acagp), central_fraction_(central_fraction),
       inline_svd_tol_(inline_svd_tol) {
     build(tree.root(), tree.root());
+
+#ifdef __GLIBC__
+    // Force glibc to use mmap (not brk) for allocations above 128 KB.
+    // mmap'd memory is returned to the OS immediately on free() via munmap,
+    // instead of being held in glibc's pool.  This keeps peak RSS at
+    //   (all already-compressed blocks) + (one block per thread at full ACA rank)
+    // rather than the full uncompressed H-matrix — critical for Ns >= 1024.
+    mallopt(M_MMAP_THRESHOLD, 128 * 1024);
+#endif
+
     const int nb = static_cast<int>(blocks_.size());
 #pragma omp parallel for schedule(dynamic, 4)
     for (int bi = 0; bi < nb; ++bi) {
