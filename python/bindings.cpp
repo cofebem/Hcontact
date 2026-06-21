@@ -89,13 +89,15 @@ public:
         return out;
     }
 
-    // Returns (N_blocks, 5) array: [row_begin, row_size, col_begin, col_size, is_dense]
-    // in permuted (cluster) index space — the natural H-matrix coordinate system.
+    // Returns (N_blocks, 6) array:
+    //   [row_begin, row_size, col_begin, col_size, is_dense, rank]
+    // rank = U.cols() for low-rank blocks, 0 for dense blocks.
+    // All indices are in permuted (cluster) index space.
     py::array_t<double> block_layout() const {
-        if (!use_h_) return py::array_t<double>(std::vector<py::ssize_t>{0, 5});
+        if (!use_h_) return py::array_t<double>(std::vector<py::ssize_t>{0, 6});
         const auto& blks = hmat_->blocks();
         const int nb = static_cast<int>(blks.size());
-        py::array_t<double> out({nb, 5});
+        py::array_t<double> out({nb, 6});
         auto r = out.mutable_unchecked<2>();
         for (int i = 0; i < nb; ++i) {
             r(i, 0) = blks[i].row_begin;
@@ -103,6 +105,7 @@ public:
             r(i, 2) = blks[i].col_begin;
             r(i, 3) = blks[i].col_size;
             r(i, 4) = blks[i].dense ? 1.0 : 0.0;
+            r(i, 5) = blks[i].dense ? 0.0 : static_cast<double>(blks[i].U.cols());
         }
         return out;
     }
