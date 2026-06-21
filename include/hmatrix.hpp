@@ -29,20 +29,28 @@ struct HMatrixInfo {
 
 // Hierarchical approximation of the Boussinesq influence matrix: quad-tree
 // block partition, Chebyshev admissibility min(diam) <= eta * dist, ACA
-// (partial pivoting) for admissible blocks, dense leaves otherwise.
+// (partial pivoting or ACA-GP) for admissible blocks, dense leaves otherwise.
 class HMatrix {
 public:
+    // use_acagp=true: ACA with geometric pivot selection (Yastrebov 2025).
+    // central_fraction: relative radius of central subset (fraction of cluster diameter).
     HMatrix(const BoussinesqKernel& kernel, const ClusterTree& tree,
-            double eta, double aca_tol);
+            double eta, double aca_tol,
+            bool use_acagp = false, double central_fraction = 0.3);
 
     Eigen::VectorXd matvec(const Eigen::VectorXd& p) const;
     HMatrixInfo info() const;
     const std::vector<HBlock>& blocks() const { return blocks_; }
 
+    // Post-ACA recompression via truncated SVD: drops singular values below
+    // svd_tol * sigma_max for each low-rank block.
+    void recompress(double svd_tol);
+
 private:
     void build(int t, int s);
     void fill_dense(HBlock& blk) const;
     void fill_aca(HBlock& blk) const;
+    void fill_aca_gp(HBlock& blk) const;
     double entry_perm(int pi, int pj) const {
         return kernel_->entry(tree_->perm()[pi], tree_->perm()[pj]);
     }
@@ -50,6 +58,8 @@ private:
     const BoussinesqKernel* kernel_;
     const ClusterTree* tree_;
     double eta_, tol_;
+    bool use_acagp_;
+    double central_fraction_;
     std::vector<HBlock> blocks_;
 };
 
