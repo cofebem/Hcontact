@@ -3,7 +3,7 @@ __pycache__/
 *.so
 *.npy
 
-# LaTeX build artifacts and generated PDFs (rebuild with `make docs`)
+# LaTeX build artifacts and compiled output PDFs (rebuild with `make docs`)
 *.aux
 *.log
 *.nav
@@ -12,3 +12,5 @@ __pycache__/
 *.toc
 *.vrb
 *.pdf
+# ...but keep the generated figure assets the slides depend on
+!doc/slides/figures/*.pdf
