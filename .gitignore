@@ -2,3 +2,12 @@ build/
 __pycache__/
 *.so
 *.npy
+
+# LaTeX build artifacts (keep .tex sources and generated figure/slide PDFs)
+*.aux
+*.log
+*.nav
+*.out
+*.snm
+*.toc
+*.vrb

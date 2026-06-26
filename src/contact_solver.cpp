@@ -7,7 +7,7 @@
 namespace hmc {
 
 ContactResult solve_contact(const MatVec& S, const Eigen::VectorXd& g0,
-                            double p_bar, double tol, int max_iter) {
+                            double p_bar, double tol, int max_iter, bool use_pr) {
     const int N = static_cast<int>(g0.size());
     if (N == 0 || p_bar <= 0.0)
         throw std::invalid_argument("solve_contact: empty gap or p_bar <= 0");
@@ -18,7 +18,8 @@ ContactResult solve_contact(const MatVec& S, const Eigen::VectorXd& g0,
 
     Eigen::VectorXd p = Eigen::VectorXd::Constant(N, p_bar);
     Eigen::VectorXd t = Eigen::VectorXd::Zero(N);
-    Eigen::VectorXd u(N), g(N);
+    Eigen::VectorXd u(N), g(N), g_prev(N);
+    g_prev.setZero();
 
     ContactResult res;
     double G_old = 1.0;
@@ -48,12 +49,18 @@ ContactResult solve_contact(const MatVec& S, const Eigen::VectorXd& g0,
         }
 
         // conjugate direction restricted to the contact set
-        double G = 0.0;
-        for (int i = 0; i < N; ++i)
-            if (p(i) > 0.0) G += g(i) * g(i);
-        const double beta = delta * G / G_old;
+        double G = 0.0, G_pr = 0.0;
+        for (int i = 0; i < N; ++i) {
+            if (p(i) > 0.0) {
+                G    += g(i) * g(i);
+                G_pr += g(i) * (g(i) - g_prev(i));
+            }
+        }
+        double beta_val = use_pr ? std::max(0.0, G_pr / G_old) : G / G_old;
+        const double beta = delta * beta_val;
         for (int i = 0; i < N; ++i)
             t(i) = (p(i) > 0.0) ? g(i) + beta * t(i) : 0.0;
+        g_prev = g;
         G_old = G;
 
         // line search tau = <g, t> / <S t, t> on the contact set

@@ -1,0 +1,290 @@
+# CLAUDE.md — Hcontact Project
+
+## What This Is
+
+A C++17 H-matrix BEM contact solver with pybind11 Python bindings.
+All paths below are relative to this repository's root.
+
+---
+
+## Conda Environments (critical — each serves one role)
+
+| Env | Role |
+|-----|------|
+| `fenicsx-env` | **Build env**: Eigen3, numpy, Python 3.12. Use for cmake, ctest, Python scripts. **No pybind11 here.** |
+| `dolfinx-010` | **pybind11 only**: used to get `pybind11_DIR` at cmake time, nothing else. |
+| `fluidpaper` | **Tamaas 2.8.1**: only for `tamaas_reference.py`. Do not use for building. |
+
+The Python `.so` module (`hmatrix_contact.cpython-312-*.so`) lands in `python/` and must be imported from there.
+
+---
+
+## Build Commands
+
+```bash
+conda activate fenicsx-env
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CXX_COMPILER=/usr/bin/g++ \
+  -Dpybind11_DIR=$(conda run -n dolfinx-010 python -m pybind11 --cmakedir)
+cmake --build build -j$(nproc)
+ctest --test-dir build --output-on-failure
+```
+
+**Why `/usr/bin/g++` and not conda gcc?**
+Conda's gcc 12 sets `_POSIX_C_SOURCE` in a way that hides `timespec_get` from `<ctime>`,
+breaking pybind11 header inclusion. System gcc 11.4 (`/usr/bin/g++`) works fine.
+
+**Why the explicit `pybind11_DIR`?**
+`fenicsx-env` has no pybind11. We borrow the cmake config from `dolfinx-010`.
+
+---
+
+## Run Tests
+
+```bash
+ctest --test-dir build --output-on-failure
+# Or individually:
+build/test_kernel
+build/test_hmatrix
+build/test_contact
+```
+
+---
+
+## Tamaas Comparison
+
+```bash
+# Step 1: generate reference in fluidpaper env (run from repo root)
+conda activate fluidpaper
+python tamaas_reference.py
+# Writes: data/{surface.npy, tamaas_pressure.npy, tamaas_meta.json}
+
+# Step 2: compare (fenicsx-env, internally calls tamaas_reference.py via conda run)
+conda activate fenicsx-env
+python compare_tamaas.py
+```
+
+---
+
+## Generate Conference Slides
+
+```bash
+conda activate fenicsx-env
+cd doc/slides
+python generate_figures.py          # writes figures/ and cache/
+export PATH=/home/vyastrebov/DISTR/TEXLIVE2020/bin/x86_64-linux:$PATH
+pdflatex slides.tex && pdflatex slides.tex   # two passes for references
+```
+
+Figures are cached in `cache/` (hertz.npz, rough_pressure.npy, timing.json).
+Delete cache files to force recomputation.
+
+---
+
+## File Layout
+
+```
+.
+├── CMakeLists.txt
+├── include/
+│   ├── boussinesq_kernel.hpp   # Love (1929) element formula, O(1) lookup table
+│   ├── cluster_tree.hpp        # quad-tree, perm/iperm, Box struct
+│   ├── hmatrix.hpp             # ACA low-rank blocks, matvec, HMatrixInfo
+│   └── contact_solver.hpp      # Polonsky-Keer PCG, ContactResult, MatVec alias
+├── src/
+│   ├── boussinesq_kernel.cpp
+│   ├── cluster_tree.cpp
+│   ├── hmatrix.cpp             # OpenMP-parallel ACA/ACA-GP fill + matvec + SVD recompress
+│   └── contact_solver.cpp
+├── python/
+│   ├── bindings.cpp            # pybind11 module 'hmatrix_contact'
+│   └── hmatrix_contact.cpython-312-x86_64-linux-gnu.so  (built artifact)
+├── tests/
+│   ├── test_kernel.cpp         # self-term, symmetry, far-field, positivity
+│   ├── test_hmatrix.cpp        # cluster tree validity, ACA accuracy, compression
+│   ├── test_contact.cpp        # Hertz: a_num/a=1.016, p_max/p0=0.998
+│   └── tamaas_test.py          # manual tamaas sanity check (fluidpaper env)
+├── tamaas_reference.py         # runs in fluidpaper; saves data/ files
+├── compare_tamaas.py           # runs in fenicsx-env; asserts L2 diff < 5%
+├── visualize_hmatrix.py        # saves fig_hmatrix_blocks.pdf (blue=low-rank, red=dense)
+├── leaf_size_bench.py          # sweep leaf sizes 8–128 for Ns=64/128
+├── bench_pr.py                 # FR vs PR+ benchmark at Ns=64–512
+├── data/
+│   ├── surface.npy             # self-affine surface (Ns=64, H=0.8, seed 12345)
+│   ├── tamaas_pressure.npy
+│   └── tamaas_meta.json
+├── doc/
+│   ├── theory/
+│   │   └── pcg.tex             # PCG theory reference: CG, β formulas, line search, P-K, GPCG
+│   ├── slides/
+│   │   ├── slides.tex          # main Beamer file (metropolis, 16:9, accent #2c7bb6)
+│   │   ├── sections/
+│   │   │   ├── hmatrix.tex     # §1: 5 slides — N² cost, quad-tree, ACA, matvec, kernel
+│   │   │   ├── hertz.tex       # §2: 4 slides — geometry, analytic, BEM+PKR, validation
+│   │   │   ├── rough.tex       # §3: 4 slides — roughness, QP, full P-K, result
+│   │   │   └── performance.tex # §4: 4 slides — memory, timing, Tamaas comparison, conclusions
+│   │   ├── generate_figures.py # generates all 9 PDF figures; pure-Python H-matrix partitioner
+│   │   ├── figures/            # generated PDF figures (gitignored)
+│   │   └── cache/              # cached solve results (gitignored)
+│   └── specs/                  # design specs (2026-06-*.md)
+```
+
+---
+
+## Theory Summary
+
+### Boussinesq BEM
+`u_z(x) = ∫ G(x−x') p(x') dA'`,   `G(r) = 1/(π E* |r|)`
+
+Discretise on Ns×Ns uniform grid, element side h = L/Ns.
+Influence matrix `S_ij` = Love (1929) exact integral of G over a square element of half-size a = h/2:
+
+```
+L(x,y,a) = (x+a)·ln[(y+a+R++)/(y-a+R+-)] + (y+a)·ln[(x+a+R++)/(x-a+R-+)]
+          + (x-a)·ln[(y-a+R--)/(y+a+R-+)] + (y-a)·ln[(x-a+R--)/(x+a+R+-)]
+```
+where `R±± = sqrt((x±a)²+(y±a)²)`.
+
+Self-term: `S_ii = 4h·ln(1+√2) / (π E*)`.
+
+Translation invariance: `S_ij` depends only on `|ix-jx|, |iy-jy|` → Ns×Ns lookup table, O(1) per entry.
+
+### H-Matrix
+- **Cluster tree**: recursive quad-tree, midpoint split, leaf ≤ leaf_size elements. Default `leaf_size=64` (optimal; 32 gives same rank but identical block structure at Ns=64/128).
+- **Admissibility**: block (t,s) is low-rank when `min(diam(t),diam(s)) ≤ η·dist(t,s)`, η = 2.0.
+- **ACA**: partially-pivoted, stopping criterion `‖u_k‖·‖v_k‖ ≤ ε_aca·‖A_k‖_F`.
+- **ACA-GP** (`use_acagp=True`): geometric first pivot (center-facing) + central-subset pivot search for subsequent ranks (Yastrebov 2025). Gives ~5% lower rank at 2× assembly cost on this smooth translation-invariant kernel. Enable with `use_acagp=True, central_fraction=0.3`.
+- **SVD recompression** (`solver.recompress(svd_tol)`): post-ACA truncated SVD via QR factorisation of U and V. Drops singular values below `svd_tol * σ_max` per block. Dramatically reduces rank: 12→2.3 (tol=0.01) or 12→1 (tol=0.5), with 47%–54% memory reduction and <0.4% change in contact area.
+- **Matvec**: OpenMP over blocks; dense blocks use GEMV, low-rank blocks use `U(V'p)`.
+- **Visualization**: `visualize_hmatrix.py` → `doc/slides/figures/fig_hmatrix_blocks.pdf` (blue=low-rank, red=dense).
+- **Leaf-size sweep**: `leaf_size_bench.py` benchmarks leaf sizes 8–128 for Ns=64/128.
+
+### Polonsky–Keer (1999) PCG
+Projected CG for the QP `min ½p'Sp + p'g₀  s.t. p≥0, mean(p)=p_bar`.
+Default β formula: **Polak-Ribière+** (`use_pr=true`); Fletcher-Reeves available via `use_pr=false`.
+Key step: **overlap correction** `p_i -= τ·g_i` for nodes where p=0 and gap<0.
+This is in the 1999 paper but absent from informal pseudocode — omitting it breaks convergence on rough surfaces.
+Full algorithm with theory in `doc/theory/pcg.tex` (compile with `pdflatex`).
+
+---
+
+## Known Quirks and Bugs
+
+### 1. pybind11 header order in `bindings.cpp`
+pybind11 headers (`pybind11/pybind11.h`, `pybind11/eigen.h`) **must come before all project headers**.
+If they come after, `<ctime>` from project headers triggers `timespec_get` not-declared error with conda gcc.
+
+### 2. Tamaas dcfft non-periodic bug
+`solver.registerNonPeriodic()` alone is **not enough** to activate non-periodic mode.
+Must also call `solver.setIntegralOperator("dcfft")` **before** `solver.solve()`.
+Without it, PKR silently solves the periodic problem even though `registerNonPeriodic` was called.
+
+### 3. Tamaas dcfft effective modulus
+With Tamaas `dcfft`, the effective modulus is `2E²` (not `E`).
+To get `E* = 1`, use `E = 1/sqrt(2)` in `tamaas_reference.py`.
+Testing with `E=1` gives `p_max/p0 ≈ 1.583` instead of `≈ 1`.
+
+### 4. Tamaas dcfft Gibbs errors
+Tamaas dcfft coefficients have ±2–8% near-field errors at r = 1–3h (Gibbs-like oscillations).
+This is why `compare_tamaas.py` asserts `L2 diff < 5%` (not 2%).
+The 3.3% observed difference is dominated by Tamaas error, not by our H-matrix approximation.
+
+### 5. Beamer enumitem conflict
+`\begin{enumerate}[leftmargin=*,label=\arabic*.]` causes `\beamer@parseitem` error.
+Fix: use plain `\begin{enumerate}` and `\begin{itemize}` without optional arguments inside frames.
+
+---
+
+## Validated Numbers
+
+| Benchmark | Value |
+|-----------|-------|
+| Hertz contact radius ratio `a_num/a_Hertz` | 1.016 |
+| Hertz peak pressure ratio `p_max/p0` | 0.998 |
+| Hertz convergence (PR+, Ns=64, tol=1e-8) | 24 iterations |
+| Hertz convergence (FR,  Ns=64, tol=1e-8) | 28 iterations |
+| Hertz convergence (PR+, Ns=128) | 35 iterations |
+| Hertz convergence (PR+, Ns=256) | 44 iterations |
+| Hertz convergence (PR+, Ns=512, tol=1e-6) | 27 iterations |
+| H-matvec vs dense (rel L2) | < 1×10⁻⁵ |
+| H-matrix compression at N=4096 (Ns=64, leaf=64) | 0.284× (36 MiB) |
+| H-matrix compression at N=262144 (Ns=512, leaf=32) | 0.012× (6483 MiB) |
+| Avg ACA rank (leaf=64, all Ns) | k ≈ 12 |
+| Avg ACA-GP rank (leaf=64, Ns=64) | k ≈ 11.7 (5% lower, 2× slower assembly) |
+| SVD recompression tol=0.01 (from ACA, leaf=64, Ns=64) | avg_k→2.3, 36→19 MiB, matvec err 1.2×10⁻⁴ |
+| SVD recompression tol=0.5 (from ACA, leaf=64, Ns=64) | avg_k→1.0, 36→17 MiB, matvec err 6.9×10⁻⁴ |
+| Rough contact fraction (Ns=64, H=0.8, p_bar=0.05) | Ac/A = 0.128 (leaf=64) |
+| Rough convergence (no recompression) | 28 iterations |
+| Rough convergence (SVD tol=0.01) | 30 iterations |
+| Tamaas pressure L2 diff | 3.3% |
+| Assembly time Ns=64 (20-core, OpenMP) | 10 ms |
+| Matvec time Ns=64 | 0.6 ms |
+| Assembly time Ns=128 | 82 ms |
+| Matvec time Ns=128 | 11 ms |
+| Assembly time Ns=256 | 457 ms |
+| Assembly time Ns=512 | 9.3 s (6.5 GiB RAM) |
+
+---
+
+## Python Module Usage
+
+```python
+import sys
+sys.path.insert(0, '/path/to/Hcontact/python')
+import hmatrix_contact as hc
+import numpy as np
+
+solver = hc.ContactSolver(
+    grid_size=64,       # Ns
+    domain_size=1.0,    # L
+    E_star=1.0,         # reduced modulus
+    eta=2.0,            # admissibility parameter
+    aca_tol=1e-6,       # ACA stopping tolerance
+    leaf_size=64,       # max cluster leaf size (default 64; optimal for memory)
+    use_hmatrix=True,   # False → dense (for testing)
+    use_acagp=False,    # True → ACA-GP geometric pivot (5% lower rank, 2× slower)
+    central_fraction=0.3, # ACA-GP central subset radius fraction
+)
+
+gap0 = np.zeros(64*64)       # initial gap field (flattened Ns×Ns)
+result = solver.solve(gap0, p_nominal=0.05)          # PR+ beta (default)
+result = solver.solve(gap0, p_nominal=0.05, use_pr=False)  # Fletcher-Reeves
+
+print(result.contact_fraction)   # Ac/A
+print(result.mean_pressure)      # should equal p_nominal
+print(result.iterations)
+print(result.converged)
+
+info = solver.hmatrix_info()
+print(f"compression: {info['compression']:.3f}x")
+
+# Optional: post-ACA SVD recompression (47% memory reduction, <0.4% contact area change)
+solver.recompress(svd_tol=0.01)  # tol=0.5 for 54% reduction (rank → 1)
+info2 = solver.hmatrix_info()
+
+# Block structure visualization
+layout = solver.block_layout()  # (n_blocks, 5) array: row_begin, row_size, col_begin, col_size, is_dense
+```
+
+`ContactResult` fields: `pressure`, `displacement`, `gap`, `approach`, `objective`, `error`, `iterations`, `converged`, `contact_fraction`, `mean_pressure`.
+
+---
+
+## Slides Quick Reference
+
+- 18 content slides + title = 19 frames (compiles to ~22 pages with progress bar)
+- Theme: metropolis, aspect 16:9, accent blue `#2c7bb6`
+- 9 figures: `fig_hmatrix_blocks`, `fig_kernel_decay`, `fig_hertz_geometry`, `fig_hertz_validation`, `fig_surface`, `fig_rough_result`, `fig_memory_scaling`, `fig_timing_scaling`, `fig_tamaas_comparison`
+- Section order: §1 H-matrix solver → §2 Hertz → §3 Rough surface → §4 Performance
+
+---
+
+## What Is Left To Do
+
+- **Larger grids (Ns > 512)**: With leaf_size=64 + SVD recompression tol=0.01, Ns=512 drops from 6.5 GiB → ~3 GiB. Ns=1024 estimated ~12 GiB (borderline; tol=0.5 reduces to ~10 GiB). MPI or out-of-core ACA needed beyond that.
+- **Single-precision storage**: Halves all H-matrix memory (replace `double` with `float` in HBlock.D/U/V). Not yet implemented.
+- **ACA-GP improvement**: Current implementation gives only 5% rank reduction for the smooth Boussinesq kernel. The central-subset radius and random trial selection could be tuned further.
+- Tangential/adhesive contact (Mindlin, JKR/DMT)
+- Non-conforming surface meshes
+- GPU ACA (cuBLAS)

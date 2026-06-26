@@ -23,8 +23,9 @@ using MatVec = std::function<Eigen::VectorXd(const Eigen::VectorXd&)>;
 // Polonsky & Keer (Wear 231, 1999) projected CG for the constrained problem
 //   min 1/2 p^T S p + p^T g0   s.t.  p >= 0,  mean(p) = p_bar.
 // Two operator applications per iteration (gradient + line search).
+// use_pr=true (default): Polak-Ribière+ β; use_pr=false: Fletcher-Reeves.
 ContactResult solve_contact(const MatVec& S, const Eigen::VectorXd& g0,
                             double p_bar, double tol = 1e-8,
-                            int max_iter = 5000);
+                            int max_iter = 5000, bool use_pr = true);
 
 } // namespace hmc
