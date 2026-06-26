@@ -3,7 +3,7 @@ __pycache__/
 *.so
 *.npy
 
-# LaTeX build artifacts (keep .tex sources and generated figure/slide PDFs)
+# LaTeX build artifacts and generated PDFs (rebuild with `make docs`)
 *.aux
 *.log
 *.nav
@@ -11,3 +11,4 @@ __pycache__/
 *.snm
 *.toc
 *.vrb
+*.pdf
