@@ -44,8 +44,8 @@ convolution
 \end{equation}
 On a uniform $N_s\times N_s$ grid of square elements of side $h=L/N_s$,
 discretising with piecewise-constant pressure gives the influence
-matrix $S_{ij}$ equal to the Love (1929) closed-form integral of $G$ over a
-source element, evaluated at a target element centre. Because the geometry
+matrix $S_{ij}$ equal to the Love~\cite{Love1929} closed-form integral of $G$
+over a source element, evaluated at a target element centre. Because the geometry
 is a regular grid, $S_{ij}$ depends only on the index offset
 $(|i_x-j_x|,|i_y-j_y|)$ -- the operator is \emph{translation invariant}, so
 all $N^2$ entries ($N=N_s^2$) are served from one $N_s\times N_s$ lookup
@@ -54,8 +54,8 @@ table built with $\Order(N)$ kernel evaluations.
 The contact problem is the bound- and equality-constrained quadratic
 program $\min \tfrac12 \mathbf{p}^\top S\,\mathbf{p} + \mathbf{p}^\top
 \mathbf{g}_0$ s.t.\ $\mathbf{p}\ge 0$, $\mathrm{mean}(\mathbf{p})=\bar p$,
-solved by the Polonsky--Keer projected conjugate gradient (see
-\texttt{doc/theory/pcg.tex}). \textbf{Each PCG iteration needs two
+solved by the Polonsky--Keer projected conjugate gradient~\cite{PolKeer1999}
+(see \texttt{doc/theory/pcg.tex}). \textbf{Each PCG iteration needs two
 applications of $S$.} The operator is therefore used only as a
 matrix--vector product; we never need explicit matrix entries, an LU
 factorisation, or a stored matrix. This is the key observation that selects
@@ -80,8 +80,8 @@ alone is $\approx 8.8$\,TB, so it is impossible; the classical
 $\mathcal{H}$-matrix needs several GB.}
 \end{table}
 
-The previous Hcontact backend was a classical $\mathcal{H}$-matrix: a list of
-admissible blocks, each compressed independently as $A_{ts}\approx U_{ts}
+The previous Hcontact backend was a classical $\mathcal{H}$-matrix~\cite{Hackbusch2015}:
+a list of admissible blocks, each compressed independently as $A_{ts}\approx U_{ts}
 V_{ts}^\top$ by adaptive cross approximation (ACA). This works, but for a
 regular half-space kernel it stores \emph{redundant bases}: many blocks at
 the same tree level with the same relative offset are the \emph{same matrix},
@@ -128,8 +128,8 @@ with the 1-D interpolation weight
 $S_q(x,\xi_m)=\tfrac1q+\tfrac2q\sum_{n=1}^{q-1}T_n(\xi_m)T_n(x)$
 ($T_n$ Chebyshev polynomials). In 2-D the operators are tensor products
 ($r=q^2$ nodes per box), applied as two 1-D passes rather than a Kronecker
-product. This is exactly black-box FMM: only kernel \emph{evaluations} are
-needed, never analytic multipole expansions.
+product. This is exactly the black-box FMM~\cite{FongDarve2009}: only kernel
+\emph{evaluations} are needed, never analytic multipole expansions.
 
 \subsection{The six passes}
 A matvec $\mathbf{u}=S\,\mathbf{p}$ runs
@@ -265,11 +265,7 @@ and an FFT backend for the fully-active rectangular case. None of these
 change the public API
 (\texttt{H2Operator\{build(),matvec(),print\_statistics()\}}).
 
-\paragraph{References.}
-W.~Fong, E.~Darve, \emph{The black-box fast multipole method},
-J.\ Comput.\ Phys.\ 228 (2009) 8712--8725. \;
-W.~Hackbusch, \emph{Hierarchical Matrices}, Springer 2015. \;
-A.~A.~Polonsky, L.~M.~Keer, \emph{Wear} 231 (1999) 206--219. \;
-A.~E.~H.~Love (1929) rectangular-patch surface displacement.
+\bibliographystyle{unsrt}
+\bibliography{references}
 
 \end{document}

@@ -8,6 +8,7 @@
 # hmatrix_contact module); see CLAUDE.md for the build instructions.
 
 PDFLATEX ?= pdflatex
+BIBTEX   ?= bibtex
 PYTHON   ?= python
 
 SLIDES_DIR := doc/slides
@@ -35,9 +36,12 @@ slides: figures
 	cd $(SLIDES_DIR) && $(PDFLATEX) -interaction=nonstopmode slides.tex \
 	                 && $(PDFLATEX) -interaction=nonstopmode slides.tex
 
-## theory: build every theory note in doc/theory (two passes for TOC/refs)
+## theory: build every theory note in doc/theory (pdflatex/bibtex/pdflatex x2)
 theory:
 	cd $(THEORY_DIR) && for f in *.tex; do \
+	    base=$${f%.tex}; \
+	    $(PDFLATEX) -interaction=nonstopmode $$f && \
+	    $(BIBTEX) $$base && \
 	    $(PDFLATEX) -interaction=nonstopmode $$f && \
 	    $(PDFLATEX) -interaction=nonstopmode $$f; \
 	done
@@ -48,4 +52,4 @@ clean:
 	      $(SLIDES_DIR)/slides.out $(SLIDES_DIR)/slides.snm $(SLIDES_DIR)/slides.toc \
 	      $(SLIDES_DIR)/slides.vrb
 	rm -f $(THEORY_DIR)/*.aux $(THEORY_DIR)/*.log $(THEORY_DIR)/*.out \
-	      $(THEORY_DIR)/*.toc
+	      $(THEORY_DIR)/*.toc $(THEORY_DIR)/*.bbl $(THEORY_DIR)/*.blg

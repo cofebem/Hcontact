@@ -11,6 +11,8 @@ __pycache__/
 *.snm
 *.toc
 *.vrb
+*.bbl
+*.blg
 *.pdf
 # ...but keep the generated figure assets the slides depend on
 !doc/slides/figures/*.pdf
