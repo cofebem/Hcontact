@@ -33,6 +33,14 @@ public:
         return table_[static_cast<std::size_t>(dy) * Ns_ + dx];
     }
 
+    // S as a function of the element-index offset (dix, diy); 0 outside the grid
+    // span. Used by the H2 near-field stencil cache.
+    double entry_offset(int dix, int diy) const {
+        const int dx = std::abs(dix), dy = std::abs(diy);
+        if (dx >= Ns_ || dy >= Ns_) return 0.0;
+        return table_[static_cast<std::size_t>(dy) * Ns_ + dx];
+    }
+
     Eigen::MatrixXd assemble_dense() const;
 
 private:

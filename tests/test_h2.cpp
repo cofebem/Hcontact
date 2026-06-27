@@ -1,4 +1,6 @@
+#include "boussinesq_kernel.hpp"
 #include "cheb_basis.hpp"
+#include "h2_operator.hpp"
 #include "uniform_quadtree.hpp"
 
 #include <algorithm>
@@ -75,8 +77,40 @@ static int test_tree() {
     return 0;
 }
 
+static int test_caches() {
+    hmc::BoussinesqKernel k(16, 1.0, 1.0);
+    hmc::H2Operator A(k, {4, 4, 1});
+    A.build();
+    A.print_statistics();
+    CHECK(A.n_unique_couplings() > 0);
+    CHECK(A.n_unique_couplings() < A.n_far_interactions()); // sharing happened
+    return 0;
+}
+
+static int test_accuracy() {
+    const int Ns = 32;
+    hmc::BoussinesqKernel k(Ns, 1.0, 1.0);
+    const Eigen::MatrixXd S = k.assemble_dense();
+    Eigen::VectorXd x = Eigen::VectorXd::Random(Ns * Ns);
+    const Eigen::VectorXd ref = S * x;
+    auto relerr = [&](int q) {
+        hmc::H2Operator A(k, {8, q, 1});
+        A.build();
+        const Eigen::VectorXd y = A.matvec(x);
+        return (y - ref).norm() / ref.norm();
+    };
+    const double e4 = relerr(4), e6 = relerr(6);
+    std::printf("H2 rel err: q=4 %.3e  q=6 %.3e\n", e4, e6);
+    CHECK(e4 < 5e-3);
+    CHECK(e6 < e4);
+    CHECK(e6 < 1e-4);
+    return 0;
+}
+
 int main() {
     if (int rc = test_cheb()) return rc;
     if (int rc = test_tree()) return rc;
+    if (int rc = test_caches()) return rc;
+    if (int rc = test_accuracy()) return rc;
     return 0;
 }
