@@ -74,6 +74,9 @@ solver.hmatrix_info() # block counts, ranks, compression ratio
   6194 MiB (1169× less) and builds in 0.03 s vs 24 s, at ~7e-6 rel error.
 - `python bench_h2_memory.py [--plot]` — H2 memory scaling: O(N), ~13 B/DOF
   asymptotically (51 MiB at Ns=2048 vs 128 TiB dense).
+- `python bench_h2_cputime.py` — CPU-time scaling of the rough-contact problem
+  from Ns=128 to 16384. Build and matvec are O(N); the 2.7e8-DOF operator
+  builds in 14 s, applies in 6 s, fits in 14 GiB (full solves listed to 1024).
 - `OMP_NUM_THREADS=1 python compare_tamaas_h2.py --max-n 512` — H2 vs Tamaas
   dcfft FFT, accuracy and timing. Single-thread per-matvec is 0.78→0.69× the
   FFT as Ns grows (O(N) vs O(N log N)); end-to-end solve ~1.5× faster;

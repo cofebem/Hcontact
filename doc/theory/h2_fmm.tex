@@ -196,6 +196,47 @@ $51$\,MiB versus $128$\,TiB for the dense matrix.}
 \label{tab:mem}
 \end{table}
 
+\section{CPU-time scaling to $N_s=16384$}
+
+Table~\ref{tab:cputime} (\texttt{bench\_h2\_cputime.py}, $q=6$, 20-core node)
+reports the operator build time, per-matvec wall time, and peak process RSS
+for the \texttt{example\_rough\_contact} problem from $N_s=128$ up to
+$N_s=16384$ ($N\approx2.7\times10^8$ unknowns), with the full rough-surface
+solve included where a converged solution is practical.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{rrrrrrr}
+\toprule
+$N_s$ & $N$ & build [s] & matvec [s] & RSS [GiB] & solve [s] & iters \\
+\midrule
+128   & 16\,384       & 0.007 & 0.0005 & 0.04 & 0.21  & 90 \\
+256   & 65\,536       & 0.011 & 0.0013 & 0.05 & 0.80  & 199 \\
+512   & 262\,144      & 0.023 & 0.0052 & 0.08 & 3.64  & 241 \\
+1024  & 1\,048\,576   & 0.064 & 0.019  & 0.19 & 48.0  & 906 \\
+2048  & 4\,194\,304   & 0.245 & 0.098  & 0.26 & ---   & --- \\
+4096  & 16\,777\,216  & 0.92  & 0.34   & 0.92 & ---   & --- \\
+8192  & 67\,108\,864  & 3.65  & 1.39   & 3.57 & ---   & --- \\
+16384 & 268\,435\,456 & 13.98 & 6.06   & 14.2 & ---   & --- \\
+\bottomrule
+\end{tabular}
+\caption{H2 CPU-time study ($q=6$, all cores). Build and per-matvec both scale
+$\approx\Order(N)$ (each $4\times$ in $N$ costs $\approx4\times$). The
+$2.7\times10^8$-DOF operator builds in $14$\,s, applies in $6$\,s, and fits in
+$14$\,GiB; the dense matrix would need $\sim5\times10^{8}$\,GiB. Full solves
+are listed to $N_s=1024$: beyond that the projected-CG iteration count grows,
+so the total solve time -- not the operator -- becomes the limiting cost, and
+only the operator metrics are reported.}
+\label{tab:cputime}
+\end{table}
+
+Build and matvec scale linearly in $N$, confirming the $\Order(N)$ design; the
+peak RSS is $\approx57$ bytes/DOF (the intrinsic caches are $\approx12$
+bytes/DOF, the remainder being interaction-list indices and the interpreter).
+The operator therefore reaches grids that are entirely out of reach for a
+dense or classical $\mathcal{H}$-matrix representation, at second-scale build
+and matvec times.
+
 \section{Accuracy}
 
 The interpolation error decreases geometrically with $q$; the near field is
