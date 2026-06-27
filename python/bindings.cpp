@@ -143,7 +143,13 @@ public:
             d["n_near_interactions"] = static_cast<long long>(s.n_near_interactions);
             d["n_unique_couplings"] = s.n_unique_couplings;
             d["n_near_stencils"] = s.n_near_stencils;
+            d["n_boxes"] = s.n_boxes;
+            d["n_leaves"] = s.n_leaves;
+            d["nlevels"] = s.nlevels;
             d["bytes"] = s.bytes_total;
+            d["bytes_coupling"] = static_cast<long long>(s.bytes_coupling);
+            d["bytes_near"] = static_cast<long long>(s.bytes_near);
+            d["bytes_buffers"] = static_cast<long long>(s.bytes_buffers);
             d["compression"] =
                 double(s.bytes_total) / (8.0 * double(s.N) * double(s.N));
             return d;

@@ -1,0 +1,275 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{microtype}
+
+\newcommand{\Es}{E^{*}}
+\newcommand{\Order}{\mathcal{O}}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+
+\title{A matrix-free $\mathcal{H}^2$/FMM operator for the elastic
+half-space flexibility problem\\[2pt]
+\large strategy, design choices, and validation}
+\author{Hcontact}
+\date{2026-06-27}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This note documents the matrix-free hierarchical operator
+(\texttt{backend="h2"}) used by Hcontact to apply the Boussinesq half-space
+flexibility matrix without ever forming it. The operator is a black-box
+fast multipole method (bbFMM) built on tensor-product Chebyshev
+interpolation. We explain why this design is preferred over a dense matrix
+or a classical $\mathcal{H}$-matrix with ACA-compressed blocks, describe the
+algorithm and the choices that make it efficient for a regular grid with a
+translation-invariant kernel, and report measured memory, accuracy, and a
+comparison against the FFT solver Tamaas.
+\end{abstract}
+
+\section{Problem and discretisation}
+
+We solve normal contact of a rigid rough indenter against an elastic
+half-space. The surface displacement under a pressure field is the
+convolution
+\begin{equation}
+  u_z(\mathbf{x}) = \int G(\mathbf{x}-\mathbf{x}')\,p(\mathbf{x}')\,\mathrm{d}A',
+  \qquad
+  G(r) = \frac{1}{\pi \Es\, r}.
+\end{equation}
+On a uniform $N_s\times N_s$ grid of square elements of side $h=L/N_s$,
+discretising with piecewise-constant pressure gives the influence
+matrix $S_{ij}$ equal to the Love (1929) closed-form integral of $G$ over a
+source element, evaluated at a target element centre. Because the geometry
+is a regular grid, $S_{ij}$ depends only on the index offset
+$(|i_x-j_x|,|i_y-j_y|)$ -- the operator is \emph{translation invariant}, so
+all $N^2$ entries ($N=N_s^2$) are served from one $N_s\times N_s$ lookup
+table built with $\Order(N)$ kernel evaluations.
+
+The contact problem is the bound- and equality-constrained quadratic
+program $\min \tfrac12 \mathbf{p}^\top S\,\mathbf{p} + \mathbf{p}^\top
+\mathbf{g}_0$ s.t.\ $\mathbf{p}\ge 0$, $\mathrm{mean}(\mathbf{p})=\bar p$,
+solved by the Polonsky--Keer projected conjugate gradient (see
+\texttt{doc/theory/pcg.tex}). \textbf{Each PCG iteration needs two
+applications of $S$.} The operator is therefore used only as a
+matrix--vector product; we never need explicit matrix entries, an LU
+factorisation, or a stored matrix. This is the key observation that selects
+the algorithm.
+
+\section{Why matrix-free: the cost landscape}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lll}
+\toprule
+approach & memory & matvec \\
+\midrule
+dense matrix                       & $\Order(N^2)$        & $\Order(N^2)$ \\
+classical $\mathcal{H}$-matrix (ACA) & $\Order(N\log N)$  & $\Order(N\log N)$ \\
+FFT convolution (zero-padded)      & $\Order(N)$          & $\Order(N\log N)$ \\
+$\mathcal{H}^2$/FMM (this note)    & $\Order(N)$          & $\Order(N)$ \\
+\bottomrule
+\end{tabular}
+\caption{Asymptotic cost. For $N_s=1024$ ($N\approx10^6$) the dense matrix
+alone is $\approx 8.8$\,TB, so it is impossible; the classical
+$\mathcal{H}$-matrix needs several GB.}
+\end{table}
+
+The previous Hcontact backend was a classical $\mathcal{H}$-matrix: a list of
+admissible blocks, each compressed independently as $A_{ts}\approx U_{ts}
+V_{ts}^\top$ by adaptive cross approximation (ACA). This works, but for a
+regular half-space kernel it stores \emph{redundant bases}: many blocks at
+the same tree level with the same relative offset are the \emph{same matrix},
+yet each is approximated and stored separately. The memory is
+$\Order(N\log N)$ with a large constant (e.g.\ $6.2$\,GB at $N_s=512$).
+
+The $\mathcal{H}^2$/FMM design removes this redundancy in two ways:
+(i)~it stores a \emph{single basis per cluster} rather than factors per
+block, replacing $A_{ts}\approx U_{ts}V_{ts}^\top$ with
+$A_{ts}\approx V_t\, S_{ts}\, V_s^\top$ where $V_t,V_s$ are shared
+interpolation operators and $S_{ts}$ is a small coupling matrix; and
+(ii)~it exploits translation invariance so that the $V$'s and $S_{ts}$'s are
+\emph{cached by $(\text{level},\text{relative offset})$}. The result is
+$\Order(N)$ memory with a small constant.
+
+\section{The strategy: black-box FMM with Chebyshev interpolation}
+
+\subsection{Uniform quad-tree}
+A balanced quad-tree partitions the grid down to square leaves of side
+$\ell$ (\texttt{leaf\_side}, default~$8$, i.e.\ $64$ DOF/leaf). Boxes store
+only \emph{index ranges} $[i_{x0},i_{x0}+s)\times[i_{y0},i_{y0}+s)$, never
+explicit index lists, so the tree is $\Order(N/\ell^2)$ tiny structs.
+
+\subsection{Near/far split}
+A target box interacts \emph{directly} (exact kernel) with leaves in its
+\texttt{near\_radius} neighbourhood (default $1$, the $3\times3$ block) and
+\emph{approximately} (interpolation) with the standard FMM interaction list
+-- children of the parent's neighbours that are not themselves near
+neighbours. The interaction list has bounded size at every level, and
+together the near field and the per-level interaction lists cover every pair
+$(i,j)$ exactly once.
+
+\subsection{Degenerate-kernel (Chebyshev) approximation}
+For a well-separated target box $t$ and source box $s$, the kernel is
+approximated by interpolating each argument on $q$ Chebyshev nodes
+$\{\xi_a\}$ per axis:
+\begin{equation}
+  G(\mathbf{x},\mathbf{y}) \approx
+  \sum_{a}\sum_{b} S_q(\mathbf{x},\boldsymbol{\xi}_a^{t})\,
+  G(\boldsymbol{\xi}_a^{t},\boldsymbol{\xi}_b^{s})\,
+  S_q(\mathbf{y},\boldsymbol{\xi}_b^{s}),
+\end{equation}
+with the 1-D interpolation weight
+$S_q(x,\xi_m)=\tfrac1q+\tfrac2q\sum_{n=1}^{q-1}T_n(\xi_m)T_n(x)$
+($T_n$ Chebyshev polynomials). In 2-D the operators are tensor products
+($r=q^2$ nodes per box), applied as two 1-D passes rather than a Kronecker
+product. This is exactly black-box FMM: only kernel \emph{evaluations} are
+needed, never analytic multipole expansions.
+
+\subsection{The six passes}
+A matvec $\mathbf{u}=S\,\mathbf{p}$ runs
+\[
+\text{P2M}\;\to\;\text{M2M}\!\uparrow\;\to\;\text{M2L}\;\to\;
+\text{L2L}\!\downarrow\;\to\;\text{L2P}\;\;+\;\;\text{near}.
+\]
+\textbf{P2M} compresses leaf source values onto Chebyshev coefficients
+$M_s = W^\top X_s W$. \textbf{M2M} aggregates children to parents,
+$M_{\text{par}}\mathrel{+}=\sum_c R_c M_{\text{child}}$. \textbf{M2L}
+translates source to target coefficients along the interaction list,
+$L_t\mathrel{+}=\sum_s K_{ts}M_s$. \textbf{L2L} propagates parents to
+children, $L_{\text{child}}\mathrel{+}=R_c^\top L_{\text{par}}$. \textbf{L2P}
+evaluates $\mathbf{u}_t\mathrel{+}=W L_t W^\top$ at leaf DOFs. The
+\textbf{near} pass adds direct contributions of neighbouring leaves. All
+passes are OpenMP-parallel over boxes/leaves with disjoint writes.
+
+\subsection{Translation-invariant caching (the decisive choice)}
+On a uniform grid with a translation-invariant kernel:
+\begin{itemize}
+\item the \textbf{M2M/L2L} transfer matrices depend only on the child
+quadrant and $q$ -- there are exactly \textbf{four} $q^2\times q^2$ matrices,
+reused at every level (boxes are normalised to $[-1,1]^2$ by their geometric
+extent, giving exact $1/2$ scaling between levels);
+\item the \textbf{M2L} coupling $K_{ts}[a,b]=g(\boldsymbol{\xi}_a^t-
+\boldsymbol{\xi}_b^s)$ depends only on $(\text{level},\,\Delta b_x,\,\Delta
+b_y)$ and is cached -- a few hundred distinct $q^2\times q^2$ matrices total;
+\item the \textbf{near} stencils depend only on the relative leaf offset --
+at most $(2\,\text{near\_radius}+1)^2$ distinct $\ell^2\times\ell^2$ dense
+blocks.
+\end{itemize}
+The far-field point kernel is taken to be the \emph{same} Love cell integral
+as the near field, $g(\mathbf{d})=\mathrm{love\_uz}(\mathbf{d},h/2,h/2)/(\pi
+\Es)$, evaluated at continuous node offsets. Using the Love integral (rather
+than the bare $1/r$) makes near and far consistent, so the only far-field
+error is the interpolation error.
+
+\section{Complexity and measured memory}
+
+The caches are $\Order(\log N)$ (couplings) and $\Order(1)$ (near stencils);
+the per-box coefficient buffers are $\Order(N/\ell^2)$. Total memory is
+$\Order(N)$, dominated asymptotically by the buffers at $\approx 13$
+bytes/DOF. Table~\ref{tab:mem} (\texttt{bench\_h2\_memory.py}, $q=6$) shows
+the bytes/DOF \emph{decreasing} to this bound while a dense matrix explodes.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{rrrrrr}
+\toprule
+$N_s$ & $N$ & coupling & buffers & total & dense $N^2$ \\
+      &     & [MiB]    & [MiB]   & [MiB] & [MiB] \\
+\midrule
+64   & 4\,096      & 0.79 & 0.05  & 1.12  & 128 \\
+128  & 16\,384     & 1.19 & 0.19  & 1.66  & 2\,048 \\
+256  & 65\,536     & 1.58 & 0.75  & 2.61  & 32\,768 \\
+512  & 262\,144    & 1.98 & 3.00  & 5.26  & 524\,288 \\
+1024 & 1\,048\,576 & 2.37 & 12.0  & 14.65 & 8\,388\,608 \\
+2048 & 4\,194\,304 & 2.77 & 48.0  & 51.05 & 134\,217\,728 \\
+\bottomrule
+\end{tabular}
+\caption{H2 operator memory ($q=6$, $\ell=8$, near\_radius~$=1$). The near
+stencil cache is a constant $0.28$\,MiB. At $N_s=2048$ the operator is
+$51$\,MiB versus $128$\,TiB for the dense matrix.}
+\label{tab:mem}
+\end{table}
+
+\section{Accuracy}
+
+The interpolation error decreases geometrically with $q$; the near field is
+exact. Against the dense Love operator ($N_s=32$, \texttt{tests/test\_h2.cpp}):
+relative $L_2$ matvec error is $1.3\times10^{-4}$ at $q=4$ and
+$3.2\times10^{-6}$ at $q=6$. The H2 backend, plugged into the same PCG,
+reproduces the Hertz contact radius and peak pressure and matches the
+$\mathcal{H}$-matrix contact area exactly.
+
+\section{Comparison with the FFT solver (Tamaas)}
+
+For a fully active rectangular grid the operator is a convolution and an FFT
+matvec ($\Order(N\log N)$, $\Order(N)$ memory) is the natural reference;
+Tamaas implements this via a zero-padded \texttt{dcfft} operator.
+Table~\ref{tab:tamaas} (\texttt{compare\_tamaas\_h2.py}) compares the H2
+backend ($q=6$) against Tamaas~2.8.1 on the same self-affine surfaces.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{rrrrr}
+\toprule
+$N_s$ & frac.\ (Tamaas) & frac.\ (H2) & rel.\ $L_2$ pressure & H2 mem [MiB] \\
+\midrule
+64  & 0.1265 & 0.1260 & 3.26\% & 1.12 \\
+128 & 0.1215 & 0.1201 & 3.17\% & 1.66 \\
+256 & 0.1112 & 0.1098 & 2.92\% & 2.61 \\
+\bottomrule
+\end{tabular}
+\caption{H2 vs Tamaas FFT. Contact fractions agree to $\sim10^{-3}$.}
+\label{tab:tamaas}
+\end{table}
+
+The residual $\sim3\%$ pressure $L_2$ difference is \emph{not} an H2 error:
+the H2 operator reproduces the exact Love operator to $3\times10^{-6}$
+($q=6$), whereas Tamaas~2.8.1's \texttt{dcfft} influence coefficients
+oscillate $\pm2$--$8\%$ from the exact Love values at $1$--$3$ cell
+separations (Gibbs-like), and its effective modulus is $2\Es{}^2$ (both
+verified against Hertz theory; see the project README). The difference is
+therefore dominated by the FFT reference, and it is the same $\approx3.3\%$
+seen for the $\mathcal{H}$-matrix backend. Both H2 and FFT are $\Order(N)$ in
+memory; H2 is additionally \emph{local}, which leaves room to skip work
+outside the contact set (active-set masking), something a global FFT cannot
+do without re-padding.
+
+\section{Design choices, summarised}
+\begin{itemize}
+\item \textbf{bbFMM over analytic FMM}: kernel-agnostic, needs only
+evaluations -- robust to the Love near-field form.
+\item \textbf{Love far kernel, not $1/r$}: near/far consistency; error is
+interpolation-only.
+\item \textbf{Geometric box extent}: exact half-scaling so M2M/L2L collapse
+to four cached matrices.
+\item \textbf{Cache by (level, offset)}: turns $\Order(N\log N)$ stored
+factors into $\Order(\log N)$ couplings $+\,\Order(1)$ stencils.
+\item \textbf{Defaults} $q=6$, $\ell=8$, near\_radius~$=1$: $\sim10^{-6}$
+accuracy at a few MiB; tunable per problem.
+\item \textbf{Additive backend}: the dense and $\mathcal{H}$-matrix paths and
+all existing tests are untouched; PCG plugs into \texttt{H2Operator::matvec}.
+\end{itemize}
+
+\section{Limitations and outlook}
+The current operator runs on the full grid (the contact constraint is
+handled by the PCG projection). Natural next steps: active-domain
+\emph{masking} to skip near/far work outside the contact patch; rectangular
+($n_x\neq n_y$) and locally refined grids; single-precision cache storage;
+and an FFT backend for the fully-active rectangular case. None of these
+change the public API
+(\texttt{H2Operator\{build(),matvec(),print\_statistics()\}}).
+
+\paragraph{References.}
+W.~Fong, E.~Darve, \emph{The black-box fast multipole method},
+J.\ Comput.\ Phys.\ 228 (2009) 8712--8725. \;
+W.~Hackbusch, \emph{Hierarchical Matrices}, Springer 2015. \;
+A.~A.~Polonsky, L.~M.~Keer, \emph{Wear} 231 (1999) 206--219. \;
+A.~E.~H.~Love (1929) rectangular-patch surface displacement.
+
+\end{document}

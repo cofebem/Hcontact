@@ -55,7 +55,8 @@ def make_nonperiodic_model(n: int, e_star: float = 1.0):
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", type=Path, default=Path("data"))
-    ap.add_argument("--n", type=int, default=64)
+    # named --grid (not --n) to avoid colliding with `conda run --name`
+    ap.add_argument("--grid", dest="n", type=int, default=64)
     ap.add_argument("--pressure", type=float, default=0.05)
     ap.add_argument("--epsilon", type=float, default=1e-8)
     args = ap.parse_args()

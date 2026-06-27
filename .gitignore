@@ -15,5 +15,7 @@ __pycache__/
 # ...but keep the generated figure assets the slides depend on
 !doc/slides/figures/*.pdf
 
-# generated example output
+# generated example / benchmark output
 example_rough_contact.png
+bench_h2_memory.png
+data/tamaas_n*/

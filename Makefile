@@ -35,15 +35,17 @@ slides: figures
 	cd $(SLIDES_DIR) && $(PDFLATEX) -interaction=nonstopmode slides.tex \
 	                 && $(PDFLATEX) -interaction=nonstopmode slides.tex
 
-## theory: build the PCG theory note (two passes for TOC/refs)
+## theory: build every theory note in doc/theory (two passes for TOC/refs)
 theory:
-	cd $(THEORY_DIR) && $(PDFLATEX) -interaction=nonstopmode pcg.tex \
-	                 && $(PDFLATEX) -interaction=nonstopmode pcg.tex
+	cd $(THEORY_DIR) && for f in *.tex; do \
+	    $(PDFLATEX) -interaction=nonstopmode $$f && \
+	    $(PDFLATEX) -interaction=nonstopmode $$f; \
+	done
 
 ## clean: remove LaTeX build artifacts (keeps the .pdf output)
 clean:
 	rm -f $(SLIDES_DIR)/slides.aux $(SLIDES_DIR)/slides.log $(SLIDES_DIR)/slides.nav \
 	      $(SLIDES_DIR)/slides.out $(SLIDES_DIR)/slides.snm $(SLIDES_DIR)/slides.toc \
 	      $(SLIDES_DIR)/slides.vrb
-	rm -f $(THEORY_DIR)/pcg.aux $(THEORY_DIR)/pcg.log $(THEORY_DIR)/pcg.out \
-	      $(THEORY_DIR)/pcg.toc
+	rm -f $(THEORY_DIR)/*.aux $(THEORY_DIR)/*.log $(THEORY_DIR)/*.out \
+	      $(THEORY_DIR)/*.toc
