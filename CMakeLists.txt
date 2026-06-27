@@ -23,6 +23,7 @@ add_library(hmatrix_contact_core STATIC
   src/hmatrix.cpp
   src/contact_solver.cpp
   src/cheb_basis.cpp
+  src/uniform_quadtree.cpp
 )
 target_include_directories(hmatrix_contact_core PUBLIC include)
 target_link_libraries(hmatrix_contact_core PUBLIC Eigen3::Eigen)
