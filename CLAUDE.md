@@ -91,11 +91,17 @@ Delete cache files to force recomputation.
 │   ├── boussinesq_kernel.hpp   # Love (1929) element formula, O(1) lookup table
 │   ├── cluster_tree.hpp        # quad-tree, perm/iperm, Box struct
 │   ├── hmatrix.hpp             # ACA low-rank blocks, matvec, HMatrixInfo
+│   ├── cheb_basis.hpp          # Chebyshev nodes + interpolation weights (bbFMM)
+│   ├── uniform_quadtree.hpp    # uniform box tree, neighbors, interaction lists
+│   ├── h2_operator.hpp         # matrix-free H2/FMM operator, H2Params, H2Info
 │   └── contact_solver.hpp      # Polonsky-Keer PCG, ContactResult, MatVec alias
 ├── src/
 │   ├── boussinesq_kernel.cpp
 │   ├── cluster_tree.cpp
 │   ├── hmatrix.cpp             # OpenMP-parallel ACA/ACA-GP fill + matvec + SVD recompress
+│   ├── cheb_basis.cpp
+│   ├── uniform_quadtree.cpp
+│   ├── h2_operator.cpp         # P2M/M2M/M2L/L2L/L2P + near field; cached operators
 │   └── contact_solver.cpp
 ├── python/
 │   ├── bindings.cpp            # pybind11 module 'hmatrix_contact'
@@ -159,6 +165,16 @@ Translation invariance: `S_ij` depends only on `|ix-jx|, |iy-jy|` → Ns×Ns loo
 - **Matvec**: OpenMP over blocks; dense blocks use GEMV, low-rank blocks use `U(V'p)`.
 - **Visualization**: `visualize_hmatrix.py` → `doc/slides/figures/fig_hmatrix_blocks.pdf` (blue=low-rank, red=dense).
 - **Leaf-size sweep**: `leaf_size_bench.py` benchmarks leaf sizes 8–128 for Ns=64/128.
+
+### H2/FMM operator (`backend="h2"`) — preferred for large Ns
+Matrix-free black-box FMM (Chebyshev interpolation, Fong & Darve 2009). **No blocks stored**: shares bases per cluster and couplings per interaction, all cached by `(level, relative offset)` via translation invariance. O(N) memory, O(N) matvec.
+- **Tree**: `UniformQuadTree` — balanced quad-tree to square leaves of side `h2_leaf_side` (default 8); stores index *ranges*, no index lists. `Ns`, `leaf_side` must be powers of two.
+- **Far field**: tensor-product Chebyshev interpolation, order `q` (default 4; r=q² nodes). Passes `P2M → M2M → M2L → L2L → L2P`. Coupling `K[a,b]=g(ξ_a−ξ_b)` cached by `(level,dx,dy)`; M2M/L2L are 4 cached q²×q² matrices (scale-invariant).
+- **Near field**: exact Love stencils for leaves within `near_radius` (default 1, the 3×3 neighborhood), cached by relative leaf offset. Uses the same `love_uz` kernel as the far field (consistent; far error is interpolation-only).
+- **Kernel**: far kernel `g(dx,dy) = love_uz(dx,dy,h/2,h/2)/(πE*)` (continuous offsets); near via `BoussinesqKernel::entry_offset`.
+- **Accuracy**: rel L2 vs dense ≈ 1.3e-4 (q=4), 3e-6 (q=6); converges with q. Plugs into the same PCG (`MatVec` functor) — reproduces Hertz area/pressure exactly.
+- **Bench**: `bench_h2.py` (H2 vs H-matrix). At Ns=512: 5.3 MiB vs 6194 MiB (1169× less), build 0.03s vs 24s, matvec 8.9ms vs 144ms.
+- Spec/plan: `doc/specs/2026-06-27-h2-fmm-operator-design.md`, `doc/plans/2026-06-27-h2-fmm-operator.md`.
 
 ### Polonsky–Keer (1999) PCG
 Projected CG for the QP `min ½p'Sp + p'g₀  s.t. p≥0, mean(p)=p_bar`.
@@ -224,6 +240,10 @@ Fix: use plain `\begin{enumerate}` and `\begin{itemize}` without optional argume
 | Matvec time Ns=128 | 11 ms |
 | Assembly time Ns=256 | 457 ms |
 | Assembly time Ns=512 | 9.3 s (6.5 GiB RAM) |
+| H2 matvec accuracy vs dense (q=4 / q=6) | 1.3×10⁻⁴ / 3.2×10⁻⁶ rel L2 |
+| H2 Hertz (Ns=64, q=6) | Ac/A = 0.1943 (== H-matrix), 22 iters |
+| H2 memory Ns=512 (q=6) | 5.3 MiB (vs H-matrix 6194 MiB → 1169× less) |
+| H2 build / matvec Ns=512 (q=6) | 0.03 s / 8.9 ms (vs 24 s / 144 ms H-matrix) |
 
 ---
 
@@ -245,7 +265,15 @@ solver = hc.ContactSolver(
     use_hmatrix=True,   # False → dense (for testing)
     use_acagp=False,    # True → ACA-GP geometric pivot (5% lower rank, 2× slower)
     central_fraction=0.3, # ACA-GP central subset radius fraction
+    backend="",         # ""→hmatrix (or dense if use_hmatrix=False); "hmatrix"|"dense"|"h2"
+    q=4,                # H2 only: Chebyshev order (r=q²); q=6 for ~3e-6 accuracy
+    near_radius=1,      # H2 only: direct near field within this many leaf boxes
+    h2_leaf_side=8,     # H2 only: square leaf side (power of two)
 )
+
+# Matrix-free H2/FMM backend (O(N) memory; preferred for large Ns):
+h2 = hc.ContactSolver(grid_size=512, backend="h2", q=6)
+# same solve()/matvec() API; hmatrix_info() returns H2 stats when backend="h2"
 
 gap0 = np.zeros(64*64)       # initial gap field (flattened Ns×Ns)
 result = solver.solve(gap0, p_nominal=0.05)          # PR+ beta (default)
@@ -282,7 +310,8 @@ layout = solver.block_layout()  # (n_blocks, 5) array: row_begin, row_size, col_
 
 ## What Is Left To Do
 
-- **Larger grids (Ns > 512)**: With leaf_size=64 + SVD recompression tol=0.01, Ns=512 drops from 6.5 GiB → ~3 GiB. Ns=1024 estimated ~12 GiB (borderline; tol=0.5 reduces to ~10 GiB). MPI or out-of-core ACA needed beyond that.
+- **Larger grids (Ns > 512)**: ✅ largely solved by the `backend="h2"` operator — O(N) memory (5.3 MiB at Ns=512), so Ns=1024+ is now cheap. (H-matrix path still memory-bound; see below.)
+- **H2 follow-ups**: active-domain/masking sparsity (skip near/far work outside the contact zone via PCG active set); FFT backend for full-rectangle matvec (often simplest/fastest); rectangular grids (nx≠ny); leaf/q auto-tuning; PCG convergence + timing sweep of H2 at Ns≥1024.
 - **Single-precision storage**: Halves all H-matrix memory (replace `double` with `float` in HBlock.D/U/V). Not yet implemented.
 - **ACA-GP improvement**: Current implementation gives only 5% rank reduction for the smooth Boussinesq kernel. The central-subset radius and random trial selection could be tuned further.
 - Tangential/adhesive contact (Mindlin, JKR/DMT)
