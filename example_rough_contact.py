@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 import hmatrix_contact as hc
 
 # ── 2. size ───────────────────────────────────────────────────────────────────
-Ns = 128          # grid is Ns x Ns; must be a power of two for backend="h2"
+Ns = 1024          # grid is Ns x Ns; must be a power of two for backend="h2"
 L = 1.0           # domain side length
 p_bar = 0.05      # applied (nominal) mean pressure, in units of E*
 
