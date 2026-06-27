@@ -81,6 +81,16 @@ def main() -> None:
     objective = solver.solve(args.pressure)
     t_solve = time.perf_counter() - t0
 
+    # Time the dcfft influence-operator apply (u = S p), for a fair per-matvec
+    # comparison against the H2 operator.
+    op = model.operators["dcfft"]
+    op(model.traction, model.displacement)  # warm up
+    n_mv = 50
+    t0 = time.perf_counter()
+    for _ in range(n_mv):
+        op(model.traction, model.displacement)
+    t_matvec = (time.perf_counter() - t0) / n_mv
+
     traction = np.asarray(model.traction, dtype=float)
     meta = {
         "n": args.n,
@@ -92,6 +102,7 @@ def main() -> None:
         "mean_pressure": float(traction.mean()),
         "time_surface_s": t_surface,
         "time_solve_s": t_solve,
+        "time_matvec_s": t_matvec,
     }
 
     np.save(args.out / "surface.npy", surface)

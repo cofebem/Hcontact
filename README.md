@@ -72,6 +72,12 @@ solver.hmatrix_info() # block counts, ranks, compression ratio
 - `python bench_h2.py` — matrix-free **H2/FMM** backend vs the classical
   H-matrix across grid sizes. At Ns=512 the H2 operator stores 5.3 MiB vs
   6194 MiB (1169× less) and builds in 0.03 s vs 24 s, at ~7e-6 rel error.
+- `python bench_h2_memory.py [--plot]` — H2 memory scaling: O(N), ~13 B/DOF
+  asymptotically (51 MiB at Ns=2048 vs 128 TiB dense).
+- `OMP_NUM_THREADS=1 python compare_tamaas_h2.py --max-n 512` — H2 vs Tamaas
+  dcfft FFT, accuracy and timing. Single-thread per-matvec is 0.78→0.69× the
+  FFT as Ns grows (O(N) vs O(N log N)); end-to-end solve ~1.5× faster;
+  pressure L2 ~3.3% (Tamaas near-field error).
 - `python example_rough_contact.py` — end-to-end rough-surface contact on the
   H2 backend (self-affine surface → applied mean pressure → contact-area map),
   writing `example_rough_contact.png`. Scales to Ns=1024 (N ≈ 10⁶, where a
