@@ -62,13 +62,21 @@ solver.hmatrix_info() # block counts, ranks, compression ratio
 ## Tests and benchmark
 
 - `ctest --test-dir build` — kernel values vs analytics, H-matvec vs dense
-  (< 1e-5 at `aca_tol=1e-6`), Hertz contact vs theory (a and p_max within
-  5%, actual ~1.6% / 0.2% on a 64-grid).
+  (< 1e-5 at `aca_tol=1e-6`), H2-matvec vs dense (~3e-6 at `q=6`), Hertz
+  contact vs theory (a and p_max within 5%, actual ~1.6% / 0.2% on a 64-grid).
 - `python compare_tamaas.py` — rough-surface benchmark against Tamaas
   (n=64, Hurst 0.8, seed 12345, p=0.05). The Tamaas reference runs
   automatically in the `fluidpaper` env via `conda run`; cached in `data/`
   (`--regen` to refresh). Result: contact fractions agree to 0.0005,
   pressure fields to 3.3% L2.
+- `python bench_h2.py` — matrix-free **H2/FMM** backend vs the classical
+  H-matrix across grid sizes. At Ns=512 the H2 operator stores 5.3 MiB vs
+  6194 MiB (1169× less) and builds in 0.03 s vs 24 s, at ~7e-6 rel error.
+- `python example_rough_contact.py` — end-to-end rough-surface contact on the
+  H2 backend (self-affine surface → applied mean pressure → contact-area map),
+  writing `example_rough_contact.png`. Scales to Ns=1024 (N ≈ 10⁶, where a
+  dense matrix would need ≈ 8.8 TB): solves in ~50 s within ~0.2 GB RAM,
+  Ac/A ≈ 0.17.
 
 ## Tamaas 2.8.1 findings (affect any "non-periodic" Tamaas comparison)
 
