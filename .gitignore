@@ -14,3 +14,6 @@ __pycache__/
 *.pdf
 # ...but keep the generated figure assets the slides depend on
 !doc/slides/figures/*.pdf
+
+# generated example output
+example_rough_contact.png

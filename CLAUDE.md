@@ -297,6 +297,24 @@ layout = solver.block_layout()  # (n_blocks, 5) array: row_begin, row_size, col_
 
 `ContactResult` fields: `pressure`, `displacement`, `gap`, `approach`, `objective`, `error`, `iterations`, `converged`, `contact_fraction`, `mean_pressure`.
 
+### Runnable example: rough-surface contact (H2 backend)
+
+`example_rough_contact.py` — end-to-end demo (imports → Ns → self-affine surface →
+apply mean pressure → contact area → plot). Run in `fenicsx-env`:
+
+```python
+import numpy as np, hmatrix_contact as hc
+Ns = 128                                  # power of two for backend="h2"
+surface = self_affine_surface(Ns, H=0.8, rms=0.02)        # height field
+solver  = hc.ContactSolver(grid_size=Ns, backend="h2", q=6)
+res     = solver.solve(gap=-surface, p_nominal=0.05)      # rigid flat: gap0 = -height
+contact = np.asarray(res.pressure) > 0                     # in-contact mask
+print(res.contact_area)                                   # Ac/A  (also contact.mean())
+```
+
+`python example_rough_contact.py` writes `example_rough_contact.png`
+(surface | pressure | contact-area panels).
+
 ---
 
 ## Slides Quick Reference
