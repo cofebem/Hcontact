@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 import hmatrix_contact as hc
 
 # ── 2. size ───────────────────────────────────────────────────────────────────
-Ns = 1024          # grid is Ns x Ns; must be a power of two for backend="h2"
+Ns = 512          # grid is Ns x Ns; must be a power of two for backend="h2"
 L = 1.0           # domain side length
 p_bar = 0.05      # applied (nominal) mean pressure, in units of E*
 
@@ -42,6 +42,11 @@ def self_affine_surface(Ns, H=0.8, rms=0.02, seed=12345, L=1.0):
 
 
 surface = self_affine_surface(Ns, H=0.8, rms=0.02, L=L)
+x = np.linspace(0,1,Ns)
+y = np.linspace(0,1,Ns)
+X,Y = np.meshgrid(x,y)
+surface = -((X-0.5)**2 + (Y-0.5)**2)
+p_bar = 0.01
 
 # ── 4. apply pressure: solve the contact problem ──────────────────────────────
 # A rigid flat is pressed onto the rough surface, so the initial gap is -height.
