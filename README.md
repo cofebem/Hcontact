@@ -1,5 +1,8 @@
 # Hcontact — H-Matrix BEM Solver for Rough-Surface Normal Contact
 
++ **Author:** Claude Fable (foundation), Claude Opus 4.8
++ **Coordinator:** V.A. Yastrebov
+
 C++17 boundary-integral solver for frictionless normal contact of an elastic
 half-space, with a hierarchical-matrix (H-matrix) representation of the
 Boussinesq influence matrix and a Python interface. Built to the spec in
