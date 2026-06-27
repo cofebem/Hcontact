@@ -6,12 +6,14 @@
 #include "boussinesq_kernel.hpp"
 #include "cluster_tree.hpp"
 #include "contact_solver.hpp"
+#include "h2_operator.hpp"
 #include "hmatrix.hpp"
 
 #include <cstring>
 #include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <string>
 
 namespace py = pybind11;
 
@@ -44,20 +46,32 @@ class PyContactSolver {
 public:
     PyContactSolver(int grid_size, double domain_size, double E_star, double eta,
                     double aca_tol, int leaf_size, bool use_hmatrix,
-                    bool use_acagp, double central_fraction, double inline_svd_tol)
-        : kernel_(grid_size, domain_size, E_star), use_h_(use_hmatrix) {
-        if (use_h_) {
+                    bool use_acagp, double central_fraction, double inline_svd_tol,
+                    std::string backend, int q, int near_radius, int h2_leaf_side)
+        : kernel_(grid_size, domain_size, E_star) {
+        if (backend.empty()) backend = use_hmatrix ? "hmatrix" : "dense";
+        backend_ = backend;
+        if (backend_ == "h2") {
+            h2_ = std::make_unique<hmc::H2Operator>(
+                kernel_, hmc::H2Params{h2_leaf_side, q, near_radius});
+            h2_->build();
+        } else if (backend_ == "hmatrix") {
             tree_ = std::make_unique<hmc::ClusterTree>(grid_size, leaf_size);
             hmat_ = std::make_unique<hmc::HMatrix>(
                 kernel_, *tree_, eta, aca_tol, use_acagp, central_fraction,
                 inline_svd_tol);
-        } else {
+        } else if (backend_ == "dense") {
             dense_ = kernel_.assemble_dense();
+        } else {
+            throw std::invalid_argument("unknown backend: " + backend_ +
+                                        " (expected dense, hmatrix, or h2)");
         }
     }
 
     Eigen::VectorXd apply(const Eigen::VectorXd& p) const {
-        return use_h_ ? hmat_->matvec(p) : dense_ * p;
+        if (backend_ == "h2") return h2_->matvec(p);
+        if (backend_ == "hmatrix") return hmat_->matvec(p);
+        return dense_ * p;
     }
 
     py::array_t<double>
@@ -94,7 +108,8 @@ public:
     // rank = U.cols() for low-rank blocks, 0 for dense blocks.
     // All indices are in permuted (cluster) index space.
     py::array_t<double> block_layout() const {
-        if (!use_h_) return py::array_t<double>(std::vector<py::ssize_t>{0, 6});
+        if (backend_ != "hmatrix")
+            return py::array_t<double>(std::vector<py::ssize_t>{0, 6});
         const auto& blks = hmat_->blocks();
         const int nb = static_cast<int>(blks.size());
         py::array_t<double> out({nb, 6});
@@ -111,12 +126,29 @@ public:
     }
 
     void recompress(double svd_tol) {
-        if (use_h_) hmat_->recompress(svd_tol);
+        if (backend_ == "hmatrix") hmat_->recompress(svd_tol);
     }
 
     py::dict hmatrix_info() const {
         py::dict d;
-        if (!use_h_) {
+        if (backend_ == "h2") {
+            h2_->print_statistics();
+            const auto s = h2_->info();
+            d["backend"] = "h2";
+            d["n"] = s.N;
+            d["q"] = s.q;
+            d["r"] = s.r;
+            d["leaf_side"] = s.leaf_side;
+            d["n_far_interactions"] = static_cast<long long>(s.n_far_interactions);
+            d["n_near_interactions"] = static_cast<long long>(s.n_near_interactions);
+            d["n_unique_couplings"] = s.n_unique_couplings;
+            d["n_near_stencils"] = s.n_near_stencils;
+            d["bytes"] = s.bytes_total;
+            d["compression"] =
+                double(s.bytes_total) / (8.0 * double(s.N) * double(s.N));
+            return d;
+        }
+        if (backend_ != "hmatrix") {
             d["dense"] = true;
             d["bytes"] = 8LL * kernel_.size() * kernel_.size();
             py::print("dense influence matrix,", kernel_.size(), "x",
@@ -137,9 +169,10 @@ public:
 
 private:
     hmc::BoussinesqKernel kernel_;
-    bool use_h_;
+    std::string backend_;
     std::unique_ptr<hmc::ClusterTree> tree_;
     std::unique_ptr<hmc::HMatrix> hmat_;
+    std::unique_ptr<hmc::H2Operator> h2_;
     Eigen::MatrixXd dense_;
 };
 
@@ -180,14 +213,17 @@ PYBIND11_MODULE(hmatrix_contact, m) {
         });
 
     py::class_<PyContactSolver>(m, "ContactSolver")
-        .def(py::init<int, double, double, double, double, int, bool, bool, double, double>(),
+        .def(py::init<int, double, double, double, double, int, bool, bool, double,
+                      double, std::string, int, int, int>(),
              py::arg("grid_size"), py::arg("domain_size") = 1.0,
              py::arg("E_star") = 1.0, py::arg("eta") = 2.0,
              py::arg("aca_tol") = 1e-6, py::arg("leaf_size") = 64,
              py::arg("use_hmatrix") = true,
              py::arg("use_acagp") = false,
              py::arg("central_fraction") = 0.3,
-             py::arg("inline_svd_tol") = 0.0)
+             py::arg("inline_svd_tol") = 0.0,
+             py::arg("backend") = "", py::arg("q") = 4,
+             py::arg("near_radius") = 1, py::arg("h2_leaf_side") = 8)
         .def("matvec", &PyContactSolver::matvec, py::arg("p"),
              "Influence-matrix product u = S p; accepts shape (N,) or (Ns, Ns)")
         .def("solve", &PyContactSolver::solve, py::arg("gap"),
