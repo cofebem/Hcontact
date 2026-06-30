@@ -86,6 +86,56 @@ Setting `precond = None` reproduces the current C++ solver exactly (baseline).
 ## Scope / non-goals
 
 - **In:** the Python prototype, the benchmark, and a short results note.
-- **Deferred (separate spec/plan):** porting the validated preconditioner into
-  C++ `solve_contact` (header-only FFT, e.g. pocketfft, + optional
-  preconditioner argument/binding); nested-grid (cascadic/FMG) continuation.
+- **Done since (in C++):** the `|q|` preconditioner (`precond="fourier"`,
+  `fourier_precond.{hpp,cpp}`), the warm-start path (`p_init`), and the
+  single-entry nested-grid solve `hc.solve_nested(...)` (`nested_solve.{hpp,cpp}`).
+
+## Status (achieved)
+
+The spectral preconditioner + nested-grid continuation give ~4× fewer
+iterations at Ns=1024 (180→45) with the full coarse→fine solve costing less
+than one cold solve; iteration counts scale well in practice up to 8192×8192.
+Solutions are identical to the unpreconditioned solver (ΔArea 0, rel-L2 ~5e-7).
+Remaining cost at the largest grids is wall-clock, not iteration count: a
+8192×8192 solve takes ≈17 min, dominated by iterations × O(N) matvec.
+
+## Future direction: monotone multigrid (grid-independent convergence)
+
+The preconditioner conditions the *unconstrained* operator and the nested
+continuation supplies a good initial guess, but neither solves the inequality
+constraint `p ≥ 0` hierarchically — hence convergence improves but is not
+grid-independent. **Monotone multigrid (MMG; Kornhuber 1994)** is a multigrid
+built for the variational inequality itself and gives globally convergent,
+asymptotically grid-independent rates for the *constrained* problem. Three
+mechanisms:
+
+1. **Projected (truncated) Gauss–Seidel smoother** — constrained local updates
+   `p_i ← max(0, p_i − r_i/S_ii)` that decrease the energy and resolve the
+   contact boundary locally (this is what discovers the active set).
+2. **Truncated coarse-grid correction** — coarse basis functions are zeroed
+   where the fine constraint is active, so coarse corrections cannot disturb the
+   resolved inactive (out-of-contact) set.
+3. **Monotone obstacle restriction** — the bound is carried to coarse levels so
+   that any admissible coarse correction stays feasible after prolongation;
+   combined with the energy-decreasing smoother this gives unconditional global
+   convergence.
+
+**Why it is non-trivial here.** MMG is mature for *sparse* FEM contact (local
+stiffness matrices, cheap local Gauss–Seidel). Our operator `S` is *dense /
+nonlocal* (BEM): a Gauss–Seidel sweep is `O(N²)` and inherently sequential, the
+opposite of the cheap, parallel smoother MMG relies on. A dense-BEM contact MMG
+is therefore research-grade.
+
+**Pragmatic first cut (if pursued).** A truncated-monotone V-cycle that reuses
+the existing nested hierarchy and H2 operators, with a *projected block / Jacobi
+smoother restricted to the contact boundary*, residuals applied via the H2
+matvec, and the mean-load equality handled as today. This bolts the
+constraint-aware coarse correction onto the machinery already built.
+
+**References.** Kornhuber, *Monotone multigrid methods for elliptic variational
+inequalities I*, Numer. Math. 69 (1994); Gräser & Kornhuber, *Multigrid methods
+for obstacle problems*, J. Comput. Math. 27 (2009).
+
+**Recommendation.** Not planned. The current preconditioner + nested solve
+capture most of the available speedup at low cost; pursue MMG only if flat
+iteration counts at very large Ns become a hard requirement.
