@@ -39,8 +39,36 @@ growth. Reaching near grid-independence needs the complementary **nested-grid
 (cascadic/FMG) continuation** (deferred in the spec): solve coarse→fine,
 warm-starting each level with the prolonged coarse pressure + active set.
 
+## Nested-grid (cascadic / FMG) continuation
+
+Prototype: `experiments/nested_grid.py`. The surface is generated on the finest
+grid and **restricted** (2×2 block-average) to each coarser level (same physical
+surface at every level); the coarse pressure is **prolonged** to the next finer
+grid as a warm start, seeding pressure and active set; each level uses the `|q|`
+preconditioner; coarse levels solved to a looser tol (cascadic).
+
+| target Ns | cold (precond) | nested fine (inject) | nested fine (bilinear) | total work / 1 cold solve |
+|-----------|----------------|----------------------|------------------------|---------------------------|
+| 256  | 33 | 26 | 30 | 0.89× |
+| 512  | 43 | 31 | 32 | 0.79× |
+| 1024 | 62 | 45 | 51 | 0.79× |
+
+Findings:
+- The warm start cuts fine-grid iterations a further ~1.4× on top of the
+  preconditioner (62→45 at Ns=1024). Combined with preconditioning this is ~4×
+  fewer fine iterations than the original cold/unpreconditioned baseline (180→45).
+- **The entire coarse→fine solve costs *less* than a single cold solve** on the
+  target grid (work ratio 0.79× at Ns≥512) — multigrid pays for itself.
+- **Injection prolongation beats bilinear**: bilinear smears pressure across the
+  sharp contact boundary, giving a worse active-set seed. The sharp,
+  load-preserving injection is the right transfer for contact.
+- Still **not fully grid-independent** (fine iters 26→45): each octave of
+  refinement resolves *new* surface asperities, so there is genuinely new
+  fine-scale physics to solve at every level — inherent to rough contact, not a
+  defect of the method.
+
 ## Next steps
 
-- Port the `|q|` preconditioner into C++ `solve_contact` (header-only FFT +
-  optional preconditioner argument) to bank the 2–3× in production.
-- Add nested-grid continuation and re-measure; expect the growth to flatten.
+- Port the `|q|` preconditioner (and optional warm-start path) into C++
+  `solve_contact` (header-only FFT + optional preconditioner argument) to bank
+  the combined ~4× in production.

@@ -98,14 +98,20 @@ def make_precond(symbol, Ns):
 
 
 # ── projected (optionally preconditioned) CG, mirroring contact_solver.cpp ─────
-def pk_pcg(matvec, g0, p_bar, precond=None, tol=1e-8, max_iter=20000, use_pr=True):
+def pk_pcg(matvec, g0, p_bar, precond=None, tol=1e-8, max_iter=20000, use_pr=True,
+           p_init=None):
     N = g0.size
     P_total = p_bar * N
     g_scale = g0.max() - g0.min()
     if g_scale <= 0:
         g_scale = 1.0
 
-    p = np.full(N, p_bar)
+    if p_init is None:
+        p = np.full(N, p_bar)
+    else:
+        p = np.maximum(np.asarray(p_init, dtype=float).ravel().copy(), 0.0)
+        s = p.sum()
+        p = p * (P_total / s) if s > 0 else np.full(N, p_bar)
     t = np.zeros(N)
     g_prev = np.zeros(N)
     G_old = 1.0
