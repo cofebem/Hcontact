@@ -10,6 +10,7 @@
 \newcommand{\Es}{E^{*}}
 \newcommand{\Order}{\mathcal{O}}
 \newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\abs}[1]{\left\lvert #1 \right\rvert}
 
 \title{A matrix-free $\mathcal{H}^2$/FMM operator for the elastic
 half-space flexibility problem\\[2pt]
@@ -307,6 +308,104 @@ seen for the $\mathcal{H}$-matrix backend. Both H2 and FFT are $\Order(N)$ in
 memory; H2 is additionally \emph{local}, which leaves room to skip work
 outside the contact set (active-set masking), something a global FFT cannot
 do without re-padding.
+
+\section{Convergence acceleration}
+\label{sec:accel}
+
+The $\Order(N)$ operator makes a single matvec cheap, but the \emph{number} of
+projected-CG iterations grows with $N_s$ (Table~\ref{tab:cputime}), so for large
+grids the iteration count -- not the operator -- becomes the bottleneck. Two
+complementary, optional accelerations address this; both leave the result
+unchanged and \texttt{precond="none"} reproduces the original solver bit-for-bit.
+
+\paragraph{Why iterations grow.}
+The Boussinesq operator has Fourier symbol $\widehat S(\mathbf q)\propto
+1/\abs{\mathbf q}$. On an $N_s\times N_s$ grid the resolved wavenumbers span
+$q_{\min}\sim 2\pi/L$ to $q_{\max}\sim\pi N_s/L$, so the spectral condition number
+is $\kappa(S)=\widehat S(q_{\min})/\widehat S(q_{\max})=q_{\max}/q_{\min}\sim N_s$
+and unpreconditioned CG needs $\sim\sqrt{\kappa}\sim\sqrt{N_s}$ iterations --
+intrinsic to the kernel, on top of active-set discovery. The smooth Hertz problem
+grows only mildly with $N_s$, confirming the conditioning term; the very steep
+$90\!\to\!906$ growth in Table~\ref{tab:cputime} was mostly the
+\emph{surface roughening} with $N_s$ (the example surface adds higher-frequency
+content as the grid refines). On a band-limited surface with a \emph{fixed
+physical} spectrum the baseline grows $\approx\sqrt{N_s}$
+(Table~\ref{tab:precond}, $26\!\to\!180$ over a $16\times$ range in $N_s$).
+
+\paragraph{Spectral (Fourier) preconditioner.}
+Choosing $M^{-1}$ with the inverse symbol $1/\widehat S(\mathbf q)\propto
+\abs{\mathbf q}$ collapses $\kappa$ to $\Order(1)$. The bare wavenumber form
+$\abs{\mathbf q}$ and the circulant form $1/\widehat S_c$ (the FFT of the kernel's
+influence coefficients) coincide here because $\widehat S_c\sim 1/\abs{\mathbf q}$;
+the overall scale of $M^{-1}$ is irrelevant (it cancels in CG), and the $q{=}0$
+mode is zeroed (the mean/total load is fixed by the constraint, not by CG). Each
+iteration applies $z=M^{-1}g$ by FFT to the residual \emph{masked to the contact
+set}, keeps $z$ on contact, and removes its contact-set mean
+(\texttt{fourier\_precond.cpp}, Eigen FFT). The change to the Polonsky--Keer PCG
+is minimal: the preconditioned residual $z=M^{-1}g$ replaces $g$ in the direction
+build, with $\beta=\max\!\big(0,\langle z,\,g-g_{\text{prev}}\rangle\big)/
+\langle z_{\text{prev}},g_{\text{prev}}\rangle$ (PR$^+$ in the $M$-inner product)
+and $t=z+\beta t$; the \textbf{exact line search}
+$\tau=\langle g,t\rangle/\langle (St-\overline{St}),t\rangle$ and the projection,
+overlap correction, and load balance are \emph{unchanged}.
+
+\paragraph{Warm start and nested-grid (cascadic/FMG) continuation.}
+The problem is solved coarse$\to$fine. The surface is \emph{restricted}
+($2\times2$ block average) to every coarser level so each level is the
+\emph{same physical} problem; the converged coarse pressure is \emph{prolonged by
+injection} (replicate each value into its $2\times2$ block) to seed the next
+finer level via \texttt{p\_init}, which carries both the pressure and the active
+set. Injection is load-preserving and keeps a sharp contact boundary; bilinear
+prolongation smears pressure across the contact edge and gives a worse active-set
+seed. Coarse levels use a looser (cascadic) tolerance. The overlap correction can
+still reactivate nodes on the fine level, so the warm start is a seed, not a
+constraint.
+
+\paragraph{Results.}
+On a fixed-band rough surface ($p_{\text{nominal}}=0.05$, tol $10^{-8}$, $q=6$),
+the preconditioner roughly halves the growth rate and the warm start cuts a
+further $\sim1.4\times$ (Table~\ref{tab:precond}). The two combine to
+$\sim4\times$ fewer fine iterations at $N_s=1024$ ($180\!\to\!45$), and the
+\emph{entire} coarse$\to$fine solve costs less than a single cold solve on the
+target grid (work ratio $0.79\times$ at $N_s\ge512$). The C++ port matches the
+Python prototype and is solution-identical (contact-area change $0$, pressure
+rel-$L_2\sim5\times10^{-7}$); at $N_s=1024$ the wall time drops from $10.2$\,s
+(none) to $7.9$\,s (Fourier) to $6.5$\,s (nested), $\sim1.6\times$. For Hertz at
+$N_s=64$ the preconditioner alone cuts $27\!\to\!16$ iterations, and warm-starting
+from the converged solution converges in $0$ iterations.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{rrrrrrr}
+\toprule
+$N_s$ & baseline & $\abs{q}$ & circ.\ & speedup & nested (inj.) & nested (bilin.) \\
+\midrule
+64   & 26  & 19 & 19 & 1.37$\times$ & ---  & ---  \\
+128  & 43  & 25 & 24 & 1.79$\times$ & ---  & ---  \\
+256  & 56  & 33 & 33 & 1.70$\times$ & 26   & 30   \\
+512  & 83  & 43 & 43 & 1.93$\times$ & 31   & 32   \\
+1024 & 180 & 62 & 62 & 2.90$\times$ & 45   & 51   \\
+\bottomrule
+\end{tabular}
+\caption{Projected-CG iteration counts on the fixed-band rough surface
+(\texttt{experiments/precond\_pcg.py}, \texttt{nested\_grid.py}). ``baseline''
+is the unpreconditioned solver; $\abs{q}$ and ``circ.'' are the spectral
+preconditioner with the two symbols; ``nested'' is the fine-grid iteration count
+of the cascadic continuation (coarsest $N_s{=}64$). Injection prolongation beats
+bilinear at every size.}
+\label{tab:precond}
+\end{table}
+
+\paragraph{Honest limitation.}
+The method is \emph{not} fully grid-independent. Pure spectral preconditioning is
+limited by the contact restriction: masking the residual to the contact set
+breaks the FFT diagonalisation near the contact boundary and for fragmented
+contact. And each octave of refinement resolves genuinely \emph{new} asperities,
+so there is real new fine-scale work per level (fine iters $26\!\to\!45$). These
+accelerations are the path toward near grid-independence; a true
+monotone/constraint multigrid for the variational
+inequality~\cite{Kornhuber1994,Brandt1977,BornemannDeuflhard1996} is the heavier
+alternative, deferred for now.
 
 \section{Design choices, summarised}
 \begin{itemize}

@@ -1231,6 +1231,389 @@ Both $\Htwo$ and FFT are $\Order(N)$ in memory; $\Htwo$ is additionally
 \emph{local}, leaving room to skip work outside the contact set (active-set
 masking), which a global FFT cannot do without re-padding.
 
+\section{Convergence acceleration: spectral preconditioning and nested-grid continuation}
+\label{sec:accel}
+
+The previous sections make a \emph{single} matvec $\mathbf u=S\pp$ optimal:
+$\Order(N)$ work and memory. The cost of a contact \emph{solve}, however, is
+(iterations)$\times$(matvec), and Table~\ref{tab:cputime} shows the
+projected-CG iteration count climbing with $N_s$ -- from $90$ at $N_s=128$ to
+$906$ at $N_s=1024$. Beyond $N_s\sim10^3$ this iteration growth, not the
+operator, dominates the wall time. This section analyses the growth and develops
+two complementary, \emph{optional} accelerations: a spectral (Fourier)
+preconditioner and a nested-grid (cascadic / full-multigrid) continuation with
+warm starts. Both are exact in the sense that they change only the path, not the
+fixed point: with the preconditioner disabled the solver reproduces the original
+iteration bit-for-bit (Proposition~\ref{prop:precond-none}).
+
+\subsection{Why the iteration count grows: conditioning of $S$}
+\label{sec:cond}
+
+The relevant spectral fact was already noted in Section~\ref{sec:physics}: on the
+infinite plane the convolution operator has symbol
+$\widehat G(\mathbf q)=2/(\Es\abs{\mathbf q})$, decaying like $1/\abs{\mathbf q}$.
+The discrete operator inherits this through its circulant (periodic) part.
+
+\begin{proposition}[Condition number of the discrete operator]
+\label{prop:cond}
+Let $S_c$ be the circulant (periodic) discretisation of the half-space kernel on
+the $N_s\times N_s$ grid, restricted to the subspace orthogonal to the constant
+mode. Its spectral condition number satisfies
+\begin{equation}
+  \kappa_2(S_c) \;=\; \frac{\lambda_{\max}}{\lambda_{\min}}
+  \;=\; \frac{\widehat S_c(\mathbf q_{\min})}{\widehat S_c(\mathbf q_{\max})}
+  \;=\; \Theta(N_s).
+  \label{eq:kappa}
+\end{equation}
+\end{proposition}
+\begin{proof}
+$S_c$ is diagonalised by the 2-D DFT; its eigenvalues are the discrete symbol
+$\widehat S_c(\mathbf q)$, the FFT of the influence coefficients, which agree with
+the continuous symbol $2/(\Es\abs{\mathbf q})$ up to $\Order(1)$ factors on the
+resolved band. The eigenvalues are positive and \emph{decreasing} in
+$\abs{\mathbf q}$. The largest acts on the lowest nonzero wavenumber
+$\abs{\mathbf q}_{\min}=2\pi/L$ (the constant mode $\mathbf q=0$ is excluded by the
+mean constraint), the smallest on the Nyquist wavenumber
+$\abs{\mathbf q}_{\max}=\sqrt2\,\pi N_s/L$. Hence
+$\kappa_2 = \widehat S_c(\mathbf q_{\min})/\widehat S_c(\mathbf q_{\max})
+= \abs{\mathbf q}_{\max}/\abs{\mathbf q}_{\min} = \tfrac{\sqrt2}{2}N_s=\Theta(N_s)$.
+\end{proof}
+
+\begin{corollary}[CG iteration growth]
+\label{cor:cg}
+The conjugate-gradient method applied to a system with condition number $\kappa$
+reduces the energy-norm error by a factor $\varepsilon$ in at most
+$\big\lceil \tfrac12\sqrt{\kappa}\,\ln(2/\varepsilon)\big\rceil$ iterations. With
+$\kappa=\Theta(N_s)$ this is $\Order(\sqrt{N_s})$ iterations -- intrinsic to the
+$1/\abs{\mathbf q}$ kernel, independent of the matvec implementation.
+\end{corollary}
+
+Two caveats sharpen the picture for \emph{contact}. First, the active constraint
+turns the linear solve into a sequence of reduced systems on the (changing)
+contact set; \emph{active-set discovery} adds iterations on top of
+Corollary~\ref{cor:cg}. Second, the empirical growth depends on how the test
+problem is posed. The steep $90\!\to\!906$ growth in Table~\ref{tab:cputime} uses
+a surface whose spectrum \emph{extends} with $N_s$ (a rougher problem at each
+size), so it conflates conditioning with a genuinely harder problem. Isolating the
+conditioning term requires a \emph{fixed physical} spectrum: the band-limited
+self-affine surface of \code{bandlimited\_surface} (\code{experiments/precond\_pcg.py}),
+whose wavenumber band $k\in[4,32]$ is independent of $N_s$, so coarse and fine
+grids resolve the \emph{same} surface. On that family the unpreconditioned count
+grows as $26\!\to\!43\!\to\!56\!\to\!83\!\to\!180$ for $N_s=64,\dots,1024$
+(Table~\ref{tab:precond-it}) -- close to the $\sqrt{N_s}$ of
+Corollary~\ref{cor:cg} (a $16\times$ range in $N_s$ giving roughly a $7\times$
+range in iterations, the remainder being active-set work). The smooth Hertz
+problem grows only mildly with $N_s$, a further confirmation that the dominant
+term is the operator conditioning, not the contact logic.
+
+\subsection{The spectral preconditioner}
+\label{sec:precond}
+
+\paragraph{Ideal symbol.}
+Because $S_c$ is diagonalised by the DFT, the ideal (constant-spectrum)
+preconditioner is the operator with the \emph{inverse} symbol,
+\begin{equation}
+  \widehat{M^{-1}}(\mathbf q) = \frac{1}{\widehat S_c(\mathbf q)},
+  \qquad \mathbf q\ne 0,
+  \label{eq:Minv-symbol}
+\end{equation}
+for then $M^{-1}S_c$ has every nonzero eigenvalue equal to $1$ and
+$\kappa(M^{-1}S_c)=1$: CG converges in $\Order(1)$ iterations. Two realisations of
+\eqref{eq:Minv-symbol} are used.
+\begin{itemize}
+\item \textbf{Circulant symbol} $w_c(\mathbf q)=1/\widehat S_c(\mathbf q)$, with
+$\widehat S_c$ the FFT of the kernel's influence coefficients -- obtainable from
+the lookup table $T$ directly, or from a single impulse matvec
+$S\boldsymbol\delta$. This is exact for the periodic part of the operator
+(\code{symbol\_circulant}, \code{experiments/precond\_pcg.py:66--80}).
+\item \textbf{Asymptotic symbol} $w(\mathbf q)=\abs{\mathbf q}$, the continuous
+inverse of the $1/\abs{\mathbf q}$ symbol (\code{symbol\_absq}, \code{:57--63};
+the integer wavenumber form $\abs{\mathbf k}$ in
+\code{fourier\_precond.cpp:12--17}). It is parameter-free and guaranteed
+positive.
+\end{itemize}
+The two coincide for this kernel because $\widehat S_c(\mathbf q)\sim
+2/(\Es\abs{\mathbf q})$, so $1/\widehat S_c\sim\tfrac{\Es}{2}\abs{\mathbf q}$:
+both have the same shape and differ only by a constant factor, which is
+immaterial (Proposition~\ref{prop:scale}). The measured iteration counts of the
+two symbols are within one iteration at every grid size
+(Table~\ref{tab:precond-it}), so the simpler, always-positive $\abs{\mathbf q}$
+form is the production choice and the C++ implementation
+(\code{FourierPreconditioner}) carries only it.
+
+\begin{proposition}[Scale invariance]
+\label{prop:scale}
+Replacing the preconditioner $M^{-1}$ by $cM^{-1}$ for any constant $c>0$ leaves
+every iterate $\pp^{(k)}$ of the preconditioned Polonsky--Keer CG unchanged.
+\end{proposition}
+\begin{proof}
+Write $z=M^{-1}g$, so $z\mapsto cz$. The conjugacy coefficient
+$\beta=\langle z,g-g_{\text{prev}}\rangle/\langle z_{\text{prev}},g_{\text{prev}}
+\rangle$ is a ratio of two $M^{-1}$-linear forms and is therefore homogeneous of
+degree $0$ in $c$: $\beta$ is unchanged. The search direction $t=z+\beta t_{\text{prev}}$
+scales by $c$ (inductively, $t_{\text{prev}}\mapsto ct_{\text{prev}}$). The step
+length $\tau=\langle g,t\rangle/\langle St-\overline{St},t\rangle$ has numerator
+$\propto c$ and denominator $\propto c^2$, so $\tau\mapsto\tau/c$, and the update
+$\pp\mapsto\pp-\tau t$ uses $\tau t\mapsto(\tau/c)(ct)=\tau t$: invariant. The
+projection, overlap correction, and load balance act on $\pp$ alone and are
+therefore also invariant.
+\end{proof}
+
+\paragraph{The DC mode and the rigid-body constraint.}
+The symbol is zeroed at $\mathbf q=0$ ($w(0)=0$; \code{fourier\_precond.cpp:17},
+\code{:79}). The mean of the pressure (the total load) and the rigid-body approach
+are fixed by the equality constraint $\operatorname{mean}(\pp)=\bar p$ and the
+shift $\alpha$ in the gradient, \emph{not} by the CG search; removing the
+$\mathbf q=0$ component of the preconditioned residual keeps the CG direction
+inside the load-conserving subspace and prevents the (formally infinite,
+$1/\widehat S_c(0)$) DC gain from corrupting it.
+
+\paragraph{Application to the contact-masked residual.}
+Per iteration the preconditioner forms
+\begin{equation}
+  z \;=\; \Pi_{\mathcal A}\,\Big(\mathcal F^{-1}\big[\,w(\mathbf q)\,\mathcal F[\,
+  \Pi_{\mathcal A} g\,]\,\big]\Big)\;-\;\bar z_{\mathcal A}\,\mathbf 1_{\mathcal A},
+  \label{eq:apply}
+\end{equation}
+where $\mathcal A=\{i:p_i>0\}$ is the current contact (active) set,
+$\Pi_{\mathcal A}$ restricts a field to $\mathcal A$ (zero elsewhere),
+$\mathcal F$ is the 2-D DFT, and $\bar z_{\mathcal A}$ is the mean of $z$ over
+$\mathcal A$. In words: mask the gradient to the contact set, apply the symbol by
+FFT, keep the result on the contact set, and subtract its contact-set mean. This
+is \code{FourierPreconditioner::apply} (\code{fourier\_precond.cpp:57--83}); the
+2-D transform is done as $1$-D Eigen FFTs over rows then columns
+(\code{:21--55}), and the final contact-mean removal (\code{:72--81}) is the
+discrete analogue of the $\mathbf q=0$ zeroing on the \emph{reduced} space.
+
+\begin{remark}[Why masking is only an approximate diagonaliser]
+\label{rem:mask}
+The DFT diagonalises the \emph{full periodic} operator $S_c$, not its restriction
+$P_{\mathcal A}S P_{\mathcal A}$ to the contact set, which is what the projected
+CG actually inverts. Applying the full-grid inverse symbol to the masked residual,
+\eqref{eq:apply}, is therefore an \emph{approximate} preconditioner of the reduced
+Hessian: it is exact in the interior of a large, simply connected contact patch
+(where the field is locally periodic) but leaks at the contact boundary and for
+fragmented contact, where masking and the global FFT do not commute. Consequently
+$\kappa(M^{-1}P_{\mathcal A}SP_{\mathcal A})$ is reduced to $\Order(1)$ but not to
+exactly $1$; the residual growth in Table~\ref{tab:precond-it} (preconditioned
+count still rising slowly with $N_s$) is the quantitative footprint of this
+boundary leakage. This is the fundamental reason a pure spectral preconditioner
+\emph{cannot} be fully grid-independent for a constrained problem
+(Section~\ref{sec:accel-limit}).
+\end{remark}
+
+\subsection{The minimal change to the Polonsky--Keer PCG}
+\label{sec:pcg-change}
+
+The preconditioner enters the solver of Section~\ref{sec:discretisation}
+(\code{contact\_solver.cpp}) through a single substitution: the search direction
+is built from the preconditioned residual $z$ instead of the bare gradient $g$,
+with the conjugacy taken in the $M$-inner product. Everything else -- in
+particular the \emph{exact} line search, which is what makes Polonsky--Keer robust
+-- is untouched. Per iteration, on the contact set $\mathcal A$:
+\begin{align}
+  g &= S\pp + \mathbf g_0 - \alpha, \qquad
+     \alpha=\operatorname{mean}_{\mathcal A}(S\pp+\mathbf g_0)
+     &&\text{(gradient, rigid shift; unchanged)}\notag\\
+  z &= M^{-1} g \quad\text{by \eqref{eq:apply}}
+     &&\text{(\textbf{new}; $z=g$ on $\mathcal A$ if no precond)}\notag\\
+  \beta &= \max\!\Big(0,\ \frac{\langle z,\,g-g_{\text{prev}}\rangle_{\mathcal A}}
+                              {\langle z_{\text{prev}},\,g_{\text{prev}}\rangle_{\mathcal A}}\Big)
+     &&\text{(\textbf{modified}: PR$^+$ in the $M$-inner product)}\notag\\
+  t &= z + \beta\, t_{\text{prev}} \ \ \text{on }\mathcal A,\quad 0\text{ off }\mathcal A
+     &&\text{(\textbf{modified}: was $g+\beta t$)}\notag\\
+  \tau &= \frac{\langle g,t\rangle_{\mathcal A}}
+              {\langle St-\overline{St},\,t\rangle_{\mathcal A}}
+     &&\text{(\textbf{unchanged}: exact line minimiser)}\notag\\
+  \pp &\leftarrow \big(\pp-\tau t\big)_+,\quad
+       p_i \mathrel{-}=\tau g_i\ \text{for released penetrating }i,\quad
+       \pp \mathrel{*}= \tfrac{P_{\text{tot}}}{\textstyle\sum p}
+     &&\text{(\textbf{unchanged})}\notag
+\end{align}
+This is exactly \code{contact\_solver.cpp:63--122}: the preconditioned residual
+$z$ is computed at \code{:64--69} (with the unpreconditioned branch
+\code{z(i)=contact[i]?g(i):0} reproducing $z=g$ on $\mathcal A$); the $M$-inner
+products $G=\langle z,g\rangle_{\mathcal A}$ and
+$G_{\text{pr}}=\langle z,g-g_{\text{prev}}\rangle_{\mathcal A}$ at \code{:72--78};
+the direction $t=z+\beta t$ at \code{:80--81}; and the unchanged line search at
+\code{:86--101}.
+
+\begin{proposition}[Exact reduction to the original solver]
+\label{prop:precond-none}
+With \code{precond} empty (\code{precond="none"}), the preconditioned solver
+produces the \emph{same} iterates as the original Polonsky--Keer PCG, to the last
+bit.
+\end{proposition}
+\begin{proof}
+With no preconditioner the code sets $z_i=g_i$ on $\mathcal A$ and $0$ elsewhere
+(\code{contact\_solver.cpp:67--68}). Then $G=\langle g,g\rangle_{\mathcal A}$ and
+$G_{\text{pr}}=\langle g,g-g_{\text{prev}}\rangle_{\mathcal A}$ are precisely the
+Fletcher--Reeves / Polak--Ribière$^+$ scalars of the unmodified algorithm, and
+$t=g+\beta t$ is the original direction. No other line is touched. Hence every
+arithmetic operation matches the original code path. (Verified numerically in
+\code{tests/test\_precond.cpp}, and as the \code{cpp}$=$\code{none} columns of
+Table~\ref{tab:precond-it}: the C++ baseline and the Python prototype agree
+exactly.)
+\end{proof}
+
+\subsection{Warm start and nested-grid (cascadic / FMG) continuation}
+\label{sec:nested}
+
+The preconditioner attacks conditioning; the nested-grid continuation attacks the
+\emph{remaining} $N_s$-dependence (active-set discovery and boundary leakage,
+Remark~\ref{rem:mask}) by never solving a hard fine problem cold. The idea is the
+full-multigrid / cascadic strategy~\cite{Brandt1977,BornemannDeuflhard1996}: solve
+the cheapest (coarsest) grid first and use its solution to warm-start the next
+finer grid, sweeping coarse$\to$fine once.
+
+\paragraph{Grid transfers.}
+Let level $\ell$ have grid size $N_s^{(\ell)}=2^{\ell}N_s^{(0)}$.
+\begin{itemize}
+\item \textbf{Restriction} (fine$\to$coarse), applied to the \emph{surface} so
+that every level is the same physical problem: the $2\times2$ block average
+$\big(R h\big)_{IJ}=\tfrac14\sum_{a,b\in\{0,1\}}h_{2I+a,\,2J+b}$
+(\code{restrict}, \code{experiments/nested\_grid.py:28--32}). The finest surface
+is generated once and restricted down to each coarse level (\code{:56--60}), so
+coarse and fine grids see identical low-frequency content.
+\item \textbf{Prolongation} (coarse$\to$fine) of the converged \emph{pressure},
+by \emph{injection}: each coarse value is replicated into its $2\times2$ fine
+block, $\big(P\pp_c\big)_{2I+a,\,2J+b}=(\pp_c)_{IJ}$
+(\code{prolong(..., mode="inject")}, \code{:35--41}).
+\end{itemize}
+
+\begin{lemma}[Injection is load-preserving and active-set-sharp]
+\label{lem:inject}
+Injection prolongation preserves the total load and maps the coarse contact set
+onto its exact geometric refinement.
+\end{lemma}
+\begin{proof}
+A coarse cell of area $h_c^2$ refines into four fine cells of area
+$h_f^2=(h_c/2)^2=h_c^2/4$. Injecting the coarse pressure $p$ into all four gives a
+fine contribution $4\cdot p\cdot h_f^2 = p\,h_c^2$, equal to the coarse cell's
+load; summing over cells, the total load is preserved. A fine cell is active
+($p>0$) iff its parent coarse cell is active, so the prolonged active set is the
+pixel-exact refinement of the coarse contact patch -- in particular its boundary
+stays sharp.
+\end{proof}
+
+\begin{remark}[Why not bilinear]
+Bilinear prolongation produces fine pressures that are convex combinations of
+neighbouring coarse values. Across the contact boundary it manufactures small
+\emph{positive} pressures in cells whose true state is open (and shaves the
+boundary cells), so the warm-started active set is blurred. Since the active set,
+not the pressure magnitude, is the hard latent variable of the contact problem, a
+blurred seed costs the fine solve extra iterations to re-sharpen the boundary.
+Lemma~\ref{lem:inject} is exactly the property bilinear lacks. The measurements
+confirm the prediction at every size: injection beats bilinear ($26$ vs $30$ at
+$N_s=256$, $31$ vs $32$ at $512$, $45$ vs $51$ at $1024$;
+Table~\ref{tab:precond-it}).
+\end{remark}
+
+\paragraph{Warm start and cascadic tolerance.}
+At each level the solver is launched from \code{p\_init} $=$ the prolonged coarse
+pressure (renormalised to the target load, \code{contact\_solver.cpp:21--27}),
+seeding both the pressure field and the active set; \code{p\_init = nullptr}
+recovers the cold uniform start $p\equiv\bar p$. Every level uses the
+$\abs{\mathbf q}$ preconditioner. Coarse levels are solved only to a loose
+tolerance ($10^{-4}$ in the prototype, \code{experiments/nested\_grid.py:68}), the
+\emph{cascadic} choice~\cite{BornemannDeuflhard1996}: a coarse solution accurate
+enough to seed the next level need not be converged to the final tolerance, which
+is applied only on the finest grid. Finally, the fine-level overlap correction
+(\code{contact\_solver.cpp:108--115}) can still \emph{reactivate} nodes the coarse
+seed left open, so the warm start is a seed, not a hard constraint: convergence to
+the correct fine fixed point is unaffected.
+
+\subsection{Results}
+\label{sec:accel-results}
+
+\paragraph{Prototype (Python), fixed-band rough surface.}
+With $p_{\text{nominal}}=0.05$, tol $10^{-8}$, $q=6$
+(\code{experiments/precond\_pcg.py}, \code{nested\_grid.py};
+\code{experiments/precond\_results.md}):
+
+\begin{table}[h]
+\centering
+\begin{tabular}{rrrrrrrr}
+\toprule
+$N_s$ & baseline & $\abs{q}$ & circulant & nested (inj.) & nested (bilin.)
+& $A_c/A$ & rel-$p$ \\
+\midrule
+64   & 26  & 19 & 19 & ---  & ---  & 0.125 & $1.4\times10^{-7}$ \\
+128  & 43  & 25 & 24 & ---  & ---  & 0.098 & $2.4\times10^{-7}$ \\
+256  & 56  & 33 & 33 & 26   & 30   & 0.091 & $3.3\times10^{-7}$ \\
+512  & 83  & 43 & 43 & 31   & 32   & 0.095 & $4.5\times10^{-7}$ \\
+1024 & 180 & 62 & 62 & 45   & 51   & 0.105 & $4.9\times10^{-7}$ \\
+\bottomrule
+\end{tabular}
+\caption{Projected-CG iteration counts on the fixed-band rough surface.
+``baseline'' is the unpreconditioned solver (which equals the C++ \code{none}
+count exactly, Prop.~\ref{prop:precond-none}); $\abs{q}$ and ``circulant'' are
+the two preconditioner symbols; ``nested'' is the \emph{fine-grid} iteration count
+of the cascadic continuation (coarsest $N_s{=}64$) with injection vs bilinear
+prolongation. $A_c/A$ is the contact fraction and rel-$p$ the pressure rel-$L_2$
+of the preconditioned vs the unpreconditioned solution -- confirming the
+acceleration does not change the result.}
+\label{tab:precond-it}
+\end{table}
+
+Three readings of Table~\ref{tab:precond-it}.
+(i)~\emph{Preconditioning halves the growth rate}: the speedup rises from
+$1.37\times$ ($N_s=64$) to $2.90\times$ ($N_s=1024$), because the preconditioned
+count grows roughly half as fast as the baseline -- the advantage compounds at
+scale, which is exactly the large-grid regime that motivated it.
+(ii)~\emph{The warm start cuts a further $\sim1.4\times$} on top of the
+preconditioner ($62\!\to\!45$ at $N_s=1024$); combined with preconditioning this
+is $\sim4\times$ fewer fine iterations than the original cold/unpreconditioned
+baseline ($180\!\to\!45$).
+(iii)~The \emph{whole} coarse$\to$fine solve costs \emph{less} than a single cold
+solve on the target grid: the cost-weighted work ratio
+$\sum_\ell\text{(iters}_\ell)\,N_\ell^2 \,/\, \text{(cold iters)}\,N_{\text{target}}^2$
+is $0.89\times$ at $N_s=256$ and $0.79\times$ at $N_s\ge512$
+(\code{nested\_grid.py:98--100}). Multigrid pays for itself: the coarse levels are
+geometrically cheaper ($N_\ell^2$ shrinks by $4$ per level) and the seed they
+provide more than repays their cost.
+
+\paragraph{C++ port.}
+The $\abs{\mathbf q}$ preconditioner and the warm-start path are implemented in
+the production solver (\code{fourier\_precond.\{hpp,cpp\}}; the \code{precond} and
+\code{p\_init} arguments of \code{solve\_contact}, \code{contact\_solver.hpp:38--42}).
+The port matches the prototype iteration-for-iteration and is
+\emph{solution-identical} to the unpreconditioned solver: contact-area change $0$
+and pressure rel-$L_2\sim5\times10^{-7}$ (\code{experiments/bench\_cpp\_precond.py};
+the regression test \code{tests/test\_precond.cpp} asserts rel-$p<10^{-5}$,
+$\abs{\Delta A_c}<10^{-3}$, and that the preconditioner never increases the
+iteration count). In wall-clock terms at $N_s=1024$ on the fixed-band surface the
+solve drops from $10.2$\,s (\code{none}) to $7.9$\,s (\code{fourier}) to $6.5$\,s
+(nested), an end-to-end $\sim1.6\times$ -- the iteration-count gain translated into
+runtime through the $\Order(N)$ matvec. On the smooth Hertz problem at $N_s=64$
+the preconditioner alone cuts $27\!\to\!16$ iterations, and warm-starting from the
+converged pressure converges in $0$ iterations (the initial residual is already
+below tolerance), the trivial limit of the continuation.
+
+\subsection{Honest limitation and outlook for the acceleration}
+\label{sec:accel-limit}
+
+Neither device makes the solve fully grid-independent, and for a principled
+reason. The spectral preconditioner is limited by the contact restriction
+(Remark~\ref{rem:mask}): masking the residual to the contact set breaks the FFT
+diagonalisation at the contact boundary and for fragmented contact, so the
+preconditioned reduced system is well-conditioned but not perfectly so. The
+nested continuation is limited by the physics: each octave of refinement resolves
+genuinely \emph{new} asperities, so there is real new fine-scale work at every
+level -- the fine-grid count still rises ($26\!\to\!45$ over $N_s=256\!\to\!1024$,
+Table~\ref{tab:precond-it}). This residual growth is inherent to rough contact,
+not a defect of the method.
+
+These two accelerations are, however, the practical path \emph{toward} near
+grid-independence, banking a measured $\sim4\times$ in fine iterations and
+$\sim1.6\times$ in wall time at $N_s=1024$ at zero change to the solution and at
+the cost of one FFT per iteration. The heavier alternative is a genuine
+\emph{monotone / constraint multigrid} for the variational
+inequality~\cite{Kornhuber1994}, which builds the inequality constraints into the
+coarse-grid corrections (truncated/monotone restrictions) rather than only seeding
+the active set; that is expected to remove the remaining boundary-leakage term at
+the cost of a substantially more intricate solver, and is left as future work.
+
 \section{Limitations and outlook}
 \label{sec:outlook}
 
