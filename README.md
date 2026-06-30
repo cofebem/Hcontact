@@ -77,6 +77,10 @@ solver.hmatrix_info() # block counts, ranks, compression ratio
 - `python bench_h2_cputime.py` — CPU-time scaling of the rough-contact problem
   from Ns=128 to 16384. Build and matvec are O(N); the 2.7e8-DOF operator
   builds in 14 s, applies in 6 s, fits in 14 GiB (full solves listed to 1024).
+- `python experiments/bench_cpp_precond.py` — convergence acceleration:
+  `solve(precond="fourier")` and nested-grid warm start (`p_init`) vs the
+  unpreconditioned solver. At Ns=1024: 4× fewer iterations (180→45) and 1.6×
+  faster wall time, identical solution (ΔArea 0, rel-L2 ~5e-7).
 - `OMP_NUM_THREADS=1 python compare_tamaas_h2.py --max-n 512` — H2 vs Tamaas
   dcfft FFT, accuracy and timing. Single-thread per-matvec is 0.78→0.69× the
   FFT as Ns grows (O(N) vs O(N log N)); end-to-end solve ~1.5× faster;

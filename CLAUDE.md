@@ -94,7 +94,8 @@ Delete cache files to force recomputation.
 │   ├── cheb_basis.hpp          # Chebyshev nodes + interpolation weights (bbFMM)
 │   ├── uniform_quadtree.hpp    # uniform box tree, neighbors, interaction lists
 │   ├── h2_operator.hpp         # matrix-free H2/FMM operator, H2Params, H2Info
-│   └── contact_solver.hpp      # Polonsky-Keer PCG, ContactResult, MatVec alias
+│   ├── fourier_precond.hpp     # |q| spectral preconditioner (Eigen FFT)
+│   └── contact_solver.hpp      # Polonsky-Keer PCG, ContactResult, MatVec, Precond
 ├── src/
 │   ├── boussinesq_kernel.cpp
 │   ├── cluster_tree.cpp
@@ -102,7 +103,8 @@ Delete cache files to force recomputation.
 │   ├── cheb_basis.cpp
 │   ├── uniform_quadtree.cpp
 │   ├── h2_operator.cpp         # P2M/M2M/M2L/L2L/L2P + near field; cached operators
-│   └── contact_solver.cpp
+│   ├── fourier_precond.cpp
+│   └── contact_solver.cpp      # PCG with optional preconditioner + warm start
 ├── python/
 │   ├── bindings.cpp            # pybind11 module 'hmatrix_contact'
 │   └── hmatrix_contact.cpython-312-x86_64-linux-gnu.so  (built artifact)
@@ -179,6 +181,10 @@ Matrix-free black-box FMM (Chebyshev interpolation, Fong & Darve 2009). **No blo
 ### Polonsky–Keer (1999) PCG
 Projected CG for the QP `min ½p'Sp + p'g₀  s.t. p≥0, mean(p)=p_bar`.
 Default β formula: **Polak-Ribière+** (`use_pr=true`); Fletcher-Reeves available via `use_pr=false`.
+**Convergence acceleration** (2026-06): the iteration count grows ~√Ns from the operator's `1/|q|` spectral conditioning (κ(S)∼Ns), plus active-set cost.
+- **Spectral preconditioner** (`precond="fourier"`, `fourier_precond.hpp`): `M⁻¹` with symbol `∝|q|` (inverse of `Ŝ∝1/|q|`) applied by FFT to the contact-masked residual, mean-zeroed, DC zeroed. Only the CG direction/β change (M-inner product); exact line search untouched; `precond="none"` reproduces the original solver bit-for-bit. ~1.7–2.9× fewer iterations (more at larger Ns).
+- **Warm start** (`p_init=`): start PCG from a given pressure (renormalised to the load). Used for **nested-grid (cascadic/FMG) continuation**: solve coarse→fine, prolong (inject) the coarse pressure as the fine warm start. Combined with the preconditioner → up to 4× fewer iterations at Ns=1024 (180→45), full solve cheaper than one cold solve. Injection prolongation beats bilinear (sharp contact boundary). Prototypes in `experiments/`; design in `doc/specs/2026-06-30-spectral-preconditioner-design.md`.
+
 Key step: **overlap correction** `p_i -= τ·g_i` for nodes where p=0 and gap<0.
 This is in the 1999 paper but absent from informal pseudocode — omitting it breaks convergence on rough surfaces.
 Full algorithm with theory in `doc/theory/pcg.tex` (compile with `pdflatex`).
@@ -244,6 +250,9 @@ Fix: use plain `\begin{enumerate}` and `\begin{itemize}` without optional argume
 | H2 Hertz (Ns=64, q=6) | Ac/A = 0.1943 (== H-matrix), 22 iters |
 | H2 memory Ns=512 (q=6) | 5.3 MiB (vs H-matrix 6194 MiB → 1169× less) |
 | H2 build / matvec Ns=512 (q=6) | 0.03 s / 8.9 ms (vs 24 s / 144 ms H-matrix) |
+| PCG iters, fixed-band rough Ns=1024 (none/fourier/nested) | 180 / 62 / 45 (4× fewer; wall 10.2→6.5 s) |
+| Preconditioner solution match (fourier vs none) | ΔArea 0, pressure rel-L2 ~5×10⁻⁷ |
+| Hertz Ns=64 iters (none/fourier; test_precond) | 27 / 16; warm-start from solution → 0 |
 
 ---
 
@@ -278,6 +287,8 @@ h2 = hc.ContactSolver(grid_size=512, backend="h2", q=6)
 gap0 = np.zeros(64*64)       # initial gap field (flattened Ns×Ns)
 result = solver.solve(gap0, p_nominal=0.05)          # PR+ beta (default)
 result = solver.solve(gap0, p_nominal=0.05, use_pr=False)  # Fletcher-Reeves
+result = solver.solve(gap0, p_nominal=0.05, precond="fourier")  # |q| spectral preconditioner
+result = solver.solve(gap0, p_nominal=0.05, precond="fourier", p_init=p_guess)  # + warm start
 
 print(result.contact_fraction)   # Ac/A
 print(result.mean_pressure)      # should equal p_nominal

@@ -6,6 +6,7 @@
 #include "boussinesq_kernel.hpp"
 #include "cluster_tree.hpp"
 #include "contact_solver.hpp"
+#include "fourier_precond.hpp"
 #include "h2_operator.hpp"
 #include "hmatrix.hpp"
 
@@ -91,14 +92,38 @@ public:
     PyResult solve(const py::array_t<double, py::array::c_style |
                                                  py::array::forcecast>& gap,
                    double p_nominal, double tol, int max_iter,
-                   bool use_pr) const {
+                   bool use_pr, const std::string& precond,
+                   const py::object& p_init) const {
         Eigen::VectorXd g0 = to_vector(gap, kernel_.size());
+
+        hmc::Precond pc;
+        if (precond == "fourier") {
+            auto fp = std::make_shared<hmc::FourierPreconditioner>(
+                kernel_.grid_size());
+            pc = [fp](const Eigen::VectorXd& g,
+                      const std::vector<std::uint8_t>& contact) {
+                return fp->apply(g, contact);
+            };
+        } else if (precond != "none" && !precond.empty()) {
+            throw std::invalid_argument("precond must be 'none' or 'fourier'");
+        }
+
+        Eigen::VectorXd p0;
+        const Eigen::VectorXd* p0ptr = nullptr;
+        if (!p_init.is_none()) {
+            p0 = to_vector(p_init.cast<py::array_t<double, py::array::c_style |
+                                                          py::array::forcecast>>(),
+                           kernel_.size());
+            p0ptr = &p0;
+        }
+
         PyResult out;
         out.Ns = kernel_.grid_size();
         {
             py::gil_scoped_release release;
             auto op = [this](const Eigen::VectorXd& v) { return apply(v); };
-            out.r = hmc::solve_contact(op, g0, p_nominal, tol, max_iter, use_pr);
+            out.r = hmc::solve_contact(op, g0, p_nominal, tol, max_iter, use_pr,
+                                       pc, p0ptr);
         }
         return out;
     }
@@ -235,8 +260,10 @@ PYBIND11_MODULE(hmatrix_contact, m) {
         .def("solve", &PyContactSolver::solve, py::arg("gap"),
              py::arg("p_nominal"), py::arg("tol") = 1e-8,
              py::arg("max_iter") = 5000, py::arg("use_pr") = true,
-             "Solve the normal contact problem; use_pr=True (default) uses "
-             "Polak-Ribiere+ beta, use_pr=False uses Fletcher-Reeves")
+             py::arg("precond") = "none", py::arg("p_init") = py::none(),
+             "Solve the normal contact problem. use_pr=True (default) uses "
+             "Polak-Ribiere+ beta. precond='fourier' enables the |q| spectral "
+             "preconditioner; p_init is an optional warm-start pressure field.")
         .def("block_layout", &PyContactSolver::block_layout,
              "Return (N_blocks, 5) array [row_begin, row_size, col_begin, col_size, is_dense]")
         .def("recompress", &PyContactSolver::recompress, py::arg("svd_tol"),

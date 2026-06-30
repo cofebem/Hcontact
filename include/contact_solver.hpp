@@ -1,7 +1,9 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <cstdint>
 #include <functional>
+#include <vector>
 
 namespace hmc {
 
@@ -20,12 +22,23 @@ struct ContactResult {
 
 using MatVec = std::function<Eigen::VectorXd(const Eigen::VectorXd&)>;
 
+// Optional preconditioner: z = M^-1 g, given the gradient g and the contact
+// mask (contact[i] != 0). Returns z restricted to the contact set. An empty
+// Precond means unpreconditioned (z = g on the contact set).
+using Precond = std::function<Eigen::VectorXd(const Eigen::VectorXd& g,
+                                              const std::vector<std::uint8_t>& contact)>;
+
 // Polonsky & Keer (Wear 231, 1999) projected CG for the constrained problem
 //   min 1/2 p^T S p + p^T g0   s.t.  p >= 0,  mean(p) = p_bar.
 // Two operator applications per iteration (gradient + line search).
 // use_pr=true (default): Polak-Ribière+ β; use_pr=false: Fletcher-Reeves.
+// precond (optional): spectral preconditioner applied to the gradient.
+// p_init (optional): warm-start pressure (renormalised to the load); nullptr
+//   starts from the uniform field p_bar.
 ContactResult solve_contact(const MatVec& S, const Eigen::VectorXd& g0,
                             double p_bar, double tol = 1e-8,
-                            int max_iter = 5000, bool use_pr = true);
+                            int max_iter = 5000, bool use_pr = true,
+                            const Precond& precond = {},
+                            const Eigen::VectorXd* p_init = nullptr);
 
 } // namespace hmc

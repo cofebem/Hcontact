@@ -7,7 +7,8 @@
 namespace hmc {
 
 ContactResult solve_contact(const MatVec& S, const Eigen::VectorXd& g0,
-                            double p_bar, double tol, int max_iter, bool use_pr) {
+                            double p_bar, double tol, int max_iter, bool use_pr,
+                            const Precond& precond, const Eigen::VectorXd* p_init) {
     const int N = static_cast<int>(g0.size());
     if (N == 0 || p_bar <= 0.0)
         throw std::invalid_argument("solve_contact: empty gap or p_bar <= 0");
@@ -16,9 +17,20 @@ ContactResult solve_contact(const MatVec& S, const Eigen::VectorXd& g0,
     double g_scale = g0.maxCoeff() - g0.minCoeff();
     if (g_scale <= 0.0) g_scale = 1.0;
 
-    Eigen::VectorXd p = Eigen::VectorXd::Constant(N, p_bar);
+    Eigen::VectorXd p;
+    if (p_init) {
+        if (static_cast<int>(p_init->size()) != N)
+            throw std::invalid_argument("solve_contact: p_init size mismatch");
+        p = p_init->cwiseMax(0.0);
+        const double s = p.sum();
+        p = (s > 0.0) ? (p * (P_total / s)).eval()
+                      : Eigen::VectorXd::Constant(N, p_bar);
+    } else {
+        p = Eigen::VectorXd::Constant(N, p_bar);
+    }
     Eigen::VectorXd t = Eigen::VectorXd::Zero(N);
-    Eigen::VectorXd u(N), g(N), g_prev(N);
+    Eigen::VectorXd u(N), g(N), g_prev(N), z(N);
+    std::vector<std::uint8_t> contact(N, 0);
     g_prev.setZero();
 
     ContactResult res;
@@ -48,18 +60,25 @@ ContactResult solve_contact(const MatVec& S, const Eigen::VectorXd& g0,
             break;
         }
 
-        // conjugate direction restricted to the contact set
-        double G = 0.0, G_pr = 0.0;
-        for (int i = 0; i < N; ++i) {
-            if (p(i) > 0.0) {
-                G    += g(i) * g(i);
-                G_pr += g(i) * (g(i) - g_prev(i));
-            }
+        // preconditioned residual z (z = g on contact when no preconditioner)
+        for (int i = 0; i < N; ++i) contact[i] = (p(i) > 0.0) ? 1 : 0;
+        if (precond) {
+            z = precond(g, contact);
+        } else {
+            for (int i = 0; i < N; ++i) z(i) = contact[i] ? g(i) : 0.0;
         }
+
+        // conjugate direction restricted to the contact set (M-inner product)
+        double G = 0.0, G_pr = 0.0;
+        for (int i = 0; i < N; ++i)
+            if (contact[i]) {
+                G    += z(i) * g(i);
+                G_pr += z(i) * (g(i) - g_prev(i));
+            }
         double beta_val = use_pr ? std::max(0.0, G_pr / G_old) : G / G_old;
         const double beta = delta * beta_val;
         for (int i = 0; i < N; ++i)
-            t(i) = (p(i) > 0.0) ? g(i) + beta * t(i) : 0.0;
+            t(i) = contact[i] ? z(i) + beta * t(i) : 0.0;
         g_prev = g;
         G_old = G;
 
