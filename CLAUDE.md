@@ -95,6 +95,7 @@ Delete cache files to force recomputation.
 │   ├── uniform_quadtree.hpp    # uniform box tree, neighbors, interaction lists
 │   ├── h2_operator.hpp         # matrix-free H2/FMM operator, H2Params, H2Info
 │   ├── fourier_precond.hpp     # |q| spectral preconditioner (Eigen FFT)
+│   ├── nested_solve.hpp        # single-entry cascadic/FMG nested-grid solve
 │   └── contact_solver.hpp      # Polonsky-Keer PCG, ContactResult, MatVec, Precond
 ├── src/
 │   ├── boussinesq_kernel.cpp
@@ -104,6 +105,7 @@ Delete cache files to force recomputation.
 │   ├── uniform_quadtree.cpp
 │   ├── h2_operator.cpp         # P2M/M2M/M2L/L2L/L2P + near field; cached operators
 │   ├── fourier_precond.cpp
+│   ├── nested_solve.cpp        # builds per-level kernels/H2/precond, restrict+inject
 │   └── contact_solver.cpp      # PCG with optional preconditioner + warm start
 ├── python/
 │   ├── bindings.cpp            # pybind11 module 'hmatrix_contact'
@@ -183,7 +185,8 @@ Projected CG for the QP `min ½p'Sp + p'g₀  s.t. p≥0, mean(p)=p_bar`.
 Default β formula: **Polak-Ribière+** (`use_pr=true`); Fletcher-Reeves available via `use_pr=false`.
 **Convergence acceleration** (2026-06): the iteration count grows ~√Ns from the operator's `1/|q|` spectral conditioning (κ(S)∼Ns), plus active-set cost.
 - **Spectral preconditioner** (`precond="fourier"`, `fourier_precond.hpp`): `M⁻¹` with symbol `∝|q|` (inverse of `Ŝ∝1/|q|`) applied by FFT to the contact-masked residual, mean-zeroed, DC zeroed. Only the CG direction/β change (M-inner product); exact line search untouched; `precond="none"` reproduces the original solver bit-for-bit. ~1.7–2.9× fewer iterations (more at larger Ns).
-- **Warm start** (`p_init=`): start PCG from a given pressure (renormalised to the load). Used for **nested-grid (cascadic/FMG) continuation**: solve coarse→fine, prolong (inject) the coarse pressure as the fine warm start. Combined with the preconditioner → up to 4× fewer iterations at Ns=1024 (180→45), full solve cheaper than one cold solve. Injection prolongation beats bilinear (sharp contact boundary). Prototypes in `experiments/`; design in `doc/specs/2026-06-30-spectral-preconditioner-design.md`.
+- **Warm start** (`p_init=`): start PCG from a given pressure (renormalised to the load).
+- **Nested-grid (cascadic/FMG) continuation** — single C++ entry point `hc.solve_nested(grid_size, gap, p_nominal, coarsest=64, q=6, ...)` (`nested_solve.hpp`): builds the coarse→fine hierarchy and per-level H2 operators internally, restricts the gap (2×2 average), and warm-starts each level by injecting the prolonged coarse pressure (sharp contact boundary; injection beats bilinear). `grid_size` must be `coarsest·2^k`. Combined with the preconditioner → up to 4× fewer iterations at Ns=1024 (180→45), full solve cheaper than one cold solve. Prototypes in `experiments/`; design in `doc/specs/2026-06-30-spectral-preconditioner-design.md`.
 
 Key step: **overlap correction** `p_i -= τ·g_i` for nodes where p=0 and gap<0.
 This is in the 1999 paper but absent from informal pseudocode — omitting it breaks convergence on rough surfaces.
@@ -289,6 +292,9 @@ result = solver.solve(gap0, p_nominal=0.05)          # PR+ beta (default)
 result = solver.solve(gap0, p_nominal=0.05, use_pr=False)  # Fletcher-Reeves
 result = solver.solve(gap0, p_nominal=0.05, precond="fourier")  # |q| spectral preconditioner
 result = solver.solve(gap0, p_nominal=0.05, precond="fourier", p_init=p_guess)  # + warm start
+
+# Single-entry nested-grid (cascadic/FMG) solve — coarse->fine handled in C++:
+result = hc.solve_nested(grid_size=1024, gap=gap0, p_nominal=0.05, coarsest=64, q=6)
 
 print(result.contact_fraction)   # Ac/A
 print(result.mean_pressure)      # should equal p_nominal

@@ -22,7 +22,6 @@ import numpy as np
 import hmatrix_contact as hc
 
 from precond_pcg import bandlimited_surface
-from nested_grid import restrict, prolong
 
 P_BAR = 0.05
 
@@ -31,28 +30,6 @@ def timed_solve(solver, g0, **kw):
     t0 = time.perf_counter()
     res = solver.solve(g0, P_BAR, tol=1e-8, max_iter=20000, **kw)
     return res, time.perf_counter() - t0
-
-
-def nested_cpp(Ns_target, Ns_coarsest=64):
-    levels = [Ns_coarsest]
-    while levels[-1] < Ns_target:
-        levels.append(levels[-1] * 2)
-    surf = {Ns_target: bandlimited_surface(Ns_target)}
-    for Ns in reversed(levels[:-1]):
-        surf[Ns] = restrict(surf[Ns * 2])
-
-    p_init, fine_it = None, 0
-    t0 = time.perf_counter()
-    for Ns in levels:
-        solver = hc.ContactSolver(grid_size=Ns, backend="h2", q=6)
-        g0 = (-surf[Ns]).ravel()
-        lvl_tol = 1e-4 if Ns < Ns_target else 1e-8
-        res = solver.solve(g0, P_BAR, tol=lvl_tol, max_iter=20000,
-                           precond="fourier", p_init=p_init)
-        fine_it = res.iterations
-        if Ns < Ns_target:
-            p_init = prolong(np.asarray(res.pressure).reshape(Ns, Ns)).ravel()
-    return fine_it, time.perf_counter() - t0
 
 
 def main():
@@ -67,7 +44,11 @@ def main():
 
         rn, tn = timed_solve(solver, g0, precond="none")
         rf, tf = timed_solve(solver, g0, precond="fourier")
-        nit, tnest = nested_cpp(Ns)
+        # single-entry nested-grid solve (coarse->fine handled in C++)
+        t0 = time.perf_counter()
+        rnest = hc.solve_nested(grid_size=Ns, gap=g0, p_nominal=P_BAR,
+                                coarsest=64, q=6, tol=1e-8)
+        nit, tnest = rnest.iterations, time.perf_counter() - t0
 
         d_area = abs(rf.contact_area - rn.contact_area)
         relL2 = (np.linalg.norm(np.asarray(rf.pressure) - np.asarray(rn.pressure))

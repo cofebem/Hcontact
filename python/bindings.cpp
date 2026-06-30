@@ -9,6 +9,7 @@
 #include "fourier_precond.hpp"
 #include "h2_operator.hpp"
 #include "hmatrix.hpp"
+#include "nested_solve.hpp"
 
 #include <cstring>
 #include <memory>
@@ -207,6 +208,26 @@ private:
     Eigen::MatrixXd dense_;
 };
 
+// Single-entry nested-grid (cascadic/FMG) solve: builds the coarse->fine
+// hierarchy and H2 operators internally, no Python orchestration.
+PyResult py_solve_nested(
+    int grid_size,
+    const py::array_t<double, py::array::c_style | py::array::forcecast>& gap,
+    double p_nominal, double domain_size, double E_star, int coarsest, int q,
+    int leaf_side, bool precond, double tol, double coarse_tol, int max_iter,
+    bool use_pr) {
+    Eigen::VectorXd g0 = to_vector(gap, grid_size * grid_size);
+    hmc::NestedParams np{coarsest, q, leaf_side, precond, coarse_tol};
+    PyResult out;
+    out.Ns = grid_size;
+    {
+        py::gil_scoped_release release;
+        out.r = hmc::solve_contact_nested(grid_size, domain_size, E_star, g0,
+                                          p_nominal, tol, max_iter, use_pr, np);
+    }
+    return out;
+}
+
 } // namespace
 
 PYBIND11_MODULE(hmatrix_contact, m) {
@@ -270,4 +291,15 @@ PYBIND11_MODULE(hmatrix_contact, m) {
              "Truncated SVD recompression: drop singular values below svd_tol * sigma_max")
         .def("hmatrix_info", &PyContactSolver::hmatrix_info,
              "Print and return H-matrix block/compression statistics");
+
+    m.def("solve_nested", &py_solve_nested, py::arg("grid_size"),
+          py::arg("gap"), py::arg("p_nominal"), py::arg("domain_size") = 1.0,
+          py::arg("E_star") = 1.0, py::arg("coarsest") = 64, py::arg("q") = 6,
+          py::arg("leaf_side") = 8, py::arg("precond") = true,
+          py::arg("tol") = 1e-8, py::arg("coarse_tol") = 1e-4,
+          py::arg("max_iter") = 20000, py::arg("use_pr") = true,
+          "Single-entry nested-grid (cascadic/FMG) contact solve: builds the "
+          "coarse->fine hierarchy and H2 operators internally and warm-starts "
+          "each level with the prolonged coarse pressure. grid_size must equal "
+          "coarsest * 2^k. Returns a ContactResult.");
 }

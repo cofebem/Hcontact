@@ -26,6 +26,7 @@ add_library(hmatrix_contact_core STATIC
   src/uniform_quadtree.cpp
   src/h2_operator.cpp
   src/fourier_precond.cpp
+  src/nested_solve.cpp
 )
 target_include_directories(hmatrix_contact_core PUBLIC include)
 target_link_libraries(hmatrix_contact_core PUBLIC Eigen3::Eigen)
