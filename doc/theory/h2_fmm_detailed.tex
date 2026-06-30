@@ -1,0 +1,1277 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,urlcolor=blue]{hyperref}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{microtype}
+
+% ---- notation ----------------------------------------------------------
+\newcommand{\Es}{E^{*}}
+\newcommand{\Order}{\mathcal{O}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\abs}[1]{\left\lvert #1 \right\rvert}
+\newcommand{\xx}{\mathbf{x}}
+\newcommand{\yy}{\mathbf{y}}
+\newcommand{\pp}{\mathbf{p}}
+\newcommand{\dd}{\mathbf{d}}
+\newcommand{\Htwo}{\mathcal{H}^2}
+\newcommand{\Hmat}{\mathcal{H}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+% ---- theorem-like environments ----------------------------------------
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\theoremstyle{remark}
+\newtheorem{remark}{Remark}
+
+\title{The black-box FMM ($\Htwo$) operator in Hcontact:\\[4pt]
+a detailed derivation, design rationale, and validation}
+\author{Hcontact --- theory companion to \texttt{doc/theory/h2\_fmm.tex}}
+\date{2026-06-30}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document is the in-depth companion to the concise note
+\texttt{doc/theory/h2\_fmm.tex}. It explains, from first principles and at
+textbook depth, the matrix-free hierarchical operator (\code{backend="h2"})
+that Hcontact uses to apply the discrete Boussinesq half-space flexibility
+matrix $S$ without ever forming it. The operator is a black-box fast multipole
+method (bbFMM) in the sense of Fong and Darve~\cite{FongDarve2009}, built on
+tensor-product Chebyshev interpolation and specialised to the
+translation-invariant kernel on a uniform $N_s\times N_s$ grid. We derive every
+formula directly from the source files \code{boussinesq\_kernel.\{hpp,cpp\}},
+\code{cheb\_basis.\{hpp,cpp\}}, \code{uniform\_quadtree.\{hpp,cpp\}}, and
+\code{h2\_operator.\{hpp,cpp\}}, citing line numbers where the correspondence is
+load-bearing. We cover: the physical contact problem and its Green's function;
+the Love~(1929) cell integral and the lookup table; why the dense and classical
+$\Hmat$/ACA representations are wasteful for this kernel; the uniform quadtree
+and a proof that the near field and the per-level interaction lists tile every
+pair of unknowns exactly once; degenerate-kernel and Chebyshev interpolation
+theory with convergence bounds; the full derivation of the five transfer
+operators P2M, M2M, M2L, L2L, L2P, with the small-matrix forms exactly as
+coded; the translation-invariant caching that collapses storage to $\Order(N)$;
+operation and storage counts; accuracy analysis; a justification of every
+default parameter; validation against the dense operator, the classical
+$\Hmat$-matrix, and the FFT solver Tamaas; and limitations.
+\end{abstract}
+
+\tableofcontents
+\bigskip
+\hrule
+
+\section{Introduction and reading guide}
+\label{sec:intro}
+
+Hcontact solves normal elastic contact between a rigid rough indenter and an
+elastic half-space. The numerical bottleneck is the repeated application of a
+dense, fully populated influence matrix $S\in\R^{N\times N}$, $N=N_s^2$, inside
+a projected conjugate-gradient (PCG) iteration. Forming $S$ explicitly is
+quadratic in storage and matrix--vector work, which becomes impossible well
+before the grid sizes of interest ($N_s$ in the thousands, $N\sim10^{6}$--$10^{8}$).
+This document describes the operator that removes that bottleneck: a
+matrix-free $\Htwo$/FMM apply with $\Order(N)$ memory and $\Order(N)$
+matrix--vector cost.
+
+The presentation is deliberately self-contained and proceeds in the logical
+order of the algorithm. Sections~\ref{sec:physics}--\ref{sec:cost} set up the
+physics, the discretisation, and the cost problem that motivates a hierarchical
+method. Sections~\ref{sec:tree}--\ref{sec:bbfmm} develop the geometry, the
+approximation theory, and the five transfer operators. Section~\ref{sec:cache}
+explains the translation-invariant caching that is the decisive optimisation
+for a regular grid. Sections~\ref{sec:complexity}--\ref{sec:params} analyse
+complexity and accuracy and justify every parameter. Sections~\ref{sec:valid}--\ref{sec:outlook}
+report validation and discuss limitations. Throughout, claims of fact about the
+implementation are tied to specific source locations.
+
+\paragraph{Conventions.}
+A grid element is identified by integer indices $(i_x,i_y)$, $0\le i_x,i_y<N_s$,
+and stored at the global flat index $k=i_y N_s + i_x$ (row-major, $x$ fastest;
+see \code{boussinesq\_kernel.hpp:30--34} and \code{h2\_operator.cpp:175}). The
+element side is $h=L/N_s$ where $L$ is the domain size. We write $S_{ij}$ for the
+influence of source element $j$ on target element $i$, $\xx$ for a target point,
+$\yy$ for a source point, and $g$ for the (scaled) point kernel. Chebyshev order
+is $q$; the per-box interpolation rank is $r=q^2$.
+
+\section{The physical problem and its Green's function}
+\label{sec:physics}
+
+\subsection{Boussinesq's point solution and the displacement convolution}
+
+Consider a linear-elastic, isotropic half-space occupying $z\le 0$ with the free
+surface $z=0$. The classical Boussinesq solution gives the normal surface
+displacement produced by a concentrated normal force $P$ applied at the origin of
+the surface~\cite{Johnson1985}:
+\begin{equation}
+  u_z(r) = \frac{P}{\pi \Es\, r}, \qquad r=\sqrt{x^2+y^2},
+  \label{eq:boussinesq-point}
+\end{equation}
+where the reduced (plane-strain composite) modulus is
+\begin{equation}
+  \frac{1}{\Es} = \frac{1-\nu_1^2}{E_1} + \frac{1-\nu_2^2}{E_2}
+  \label{eq:estar}
+\end{equation}
+for two bodies with Young's moduli $E_{1,2}$ and Poisson ratios $\nu_{1,2}$; for a
+rigid indenter on a single elastic body the second term drops. By linear
+superposition, a distributed pressure $p(\yy)$ acting on the surface produces the
+displacement field
+\begin{equation}
+  u_z(\xx) = \int_{\Omega} G(\xx-\yy)\, p(\yy)\, \mathrm{d}A_{\yy},
+  \qquad
+  G(\mathbf{r}) = \frac{1}{\pi \Es\, \abs{\mathbf{r}}}.
+  \label{eq:convolution}
+\end{equation}
+Equation~\eqref{eq:convolution} is a two-dimensional convolution with the
+half-space Green's function $G$; it is the surface-restriction of the
+three-dimensional Boussinesq solution and is the only ingredient of the elastic
+model that the solver needs.
+
+\subsection{Why this kernel, and its analytical properties}
+
+Three features of $G$ shape every algorithmic choice that follows.
+
+\begin{enumerate}
+\item \textbf{Singular but integrable.} $G\sim 1/\abs{\mathbf r}$ has a
+non-integrable pointwise value at the origin but an integrable singularity in
+2-D, so the convolution \eqref{eq:convolution} and, in particular, the
+self-interaction of a finite element are finite. This is what lets a
+piecewise-constant discretisation use an \emph{exact} closed-form self-term
+rather than a regularisation.
+\item \textbf{Smooth and analytic away from the origin.} For
+$\abs{\mathbf r}>0$, $G$ is real-analytic. Between two well-separated regions the
+kernel $G(\xx-\yy)$ is a smooth function of $(\xx,\yy)$, hence amenable to
+polynomial interpolation with spectral accuracy
+(Section~\ref{sec:degenerate}). This is the analytic fact that makes the FMM
+work.
+\item \textbf{Translation invariant.} $G$ depends only on the difference
+$\xx-\yy$. On a uniform grid this collapses the entire $N\times N$ matrix to an
+$N_s\times N_s$ table and makes the FMM transfer operators reusable across the
+tree (Section~\ref{sec:cache}). This is the special structure that turns a
+generic $\Order(N)$ FMM into one with a very small constant.
+\end{enumerate}
+
+The spectral view is also instructive. On the (bi-)infinite plane the convolution
+operator $G\!*\!\cdot$ is diagonalised by the Fourier transform with symbol
+\begin{equation}
+  \widehat{G}(\mathbf q) = \frac{2}{\Es\,\abs{\mathbf q}},
+  \label{eq:symbol}
+\end{equation}
+i.e.\ the operator behaves like $\abs{\mathbf q}^{-1}$: it is a smoothing
+(order $-1$) pseudodifferential operator. The $1/\abs{\mathbf q}$ decay of the
+symbol both explains why FFT methods are natural (Section~\ref{sec:cost},
+\ref{sec:valid}) and why the off-diagonal blocks of $S$ are numerically low
+rank (Section~\ref{sec:degenerate}).
+
+\section{Discretisation: piecewise-constant pressure and the Love cell integral}
+\label{sec:discretisation}
+
+\subsection{Collocation with piecewise-constant pressure}
+
+We tile the contact domain with a uniform $N_s\times N_s$ grid of square
+elements of side $h=L/N_s$ and assume the pressure is constant over each element,
+$p(\yy)=p_j$ for $\yy$ in element $j$. Collocating the displacement
+\eqref{eq:convolution} at the centre $\xx_i$ of each target element $i$ gives the
+linear system $u_i=\sum_j S_{ij} p_j$ with
+\begin{equation}
+  S_{ij} = \int_{\text{element }j} G(\xx_i-\yy)\,\mathrm{d}A_{\yy}.
+  \label{eq:Sij-integral}
+\end{equation}
+The entry $S_{ij}$ is therefore the displacement at the centre of element $i$ due
+to \emph{unit uniform pressure} on element $j$. The integral
+\eqref{eq:Sij-integral} is over a square and can be evaluated in closed form.
+
+\subsection{The Love (1929) closed-form integral}
+
+Let a square source patch be centred at the origin and occupy
+$[-a,a]\times[-b,b]$, carrying unit uniform pressure. The surface normal
+displacement at a point $(x,y)$ is (Love~\cite{Love1929};
+Johnson~\cite[eq.~3.25]{Johnson1985})
+\begin{equation}
+\begin{aligned}
+  \pi\Es\, u_z(x,y;a,b) \;=\;
+  & (x+a)\,\ln\!\frac{(y+b)+R_{++}}{(y-b)+R_{+-}}
+  + (y+b)\,\ln\!\frac{(x+a)+R_{++}}{(x-a)+R_{-+}} \\[2pt]
+  &+ (x-a)\,\ln\!\frac{(y-b)+R_{--}}{(y+b)+R_{-+}}
+  + (y-b)\,\ln\!\frac{(x-a)+R_{--}}{(x+a)+R_{+-}},
+\end{aligned}
+\label{eq:love}
+\end{equation}
+where the four corner distances are
+\begin{equation}
+  R_{\pm\pm} = \sqrt{(x\pm a)^2 + (y\pm b)^2}.
+  \label{eq:corner}
+\end{equation}
+This is implemented verbatim as \code{love\_uz(x,y,a,b)} in
+\code{boussinesq\_kernel.cpp:5--16}; the function returns the right-hand side of
+\eqref{eq:love} \emph{without} the $1/(\pi\Es)$ factor (the factor is applied by
+the callers, see below). The four logarithm arguments and the four
+\code{std::hypot} distances $R_{\pm\pm}$ in the code are exactly
+\eqref{eq:love}--\eqref{eq:corner}.
+
+\begin{remark}[Derivation in one line]
+Equation~\eqref{eq:love} is obtained by integrating the point solution
+\eqref{eq:boussinesq-point} over the rectangle,
+$\int_{-a}^{a}\!\int_{-b}^{b} \big[(x-\xi)^2+(y-\eta)^2\big]^{-1/2}
+\mathrm{d}\eta\,\mathrm{d}\xi$, using
+$\int (s^2+c^2)^{-1/2}\mathrm{d}s = \operatorname{arcsinh}(s/c)
+=\ln\!\big(s+\sqrt{s^2+c^2}\big)+\text{const}$ for each variable in turn. The
+boundary terms evaluated at the four corners assemble into the four
+$(\cdot)\ln(\cdot)$ groups of \eqref{eq:love}.
+\end{remark}
+
+\subsection{The self-term}
+
+For Hcontact's square elements $a=b=h/2$. Setting $x=y=0$ in \eqref{eq:love}
+gives the diagonal entry $S_{ii}$. All four corner distances equal
+$R_{\pm\pm}=\tfrac{h}{2}\sqrt2$, and each of the four logarithm arguments reduces
+to $(1+\sqrt2)/(\sqrt2-1)=(1+\sqrt2)^2$, so each term contributes
+$\tfrac{h}{2}\cdot 2\ln(1+\sqrt2)$:
+\begin{equation}
+  S_{ii} = \frac{4h\,\ln(1+\sqrt2)}{\pi \Es}.
+  \label{eq:selfterm}
+\end{equation}
+This closed-form self-term (no singular quadrature) is one practical benefit of
+choosing the integrated Love kernel over the bare point kernel; it appears in
+the table at offset $(0,0)$, \code{boussinesq\_kernel.cpp:23--27}.
+
+\subsection{Translation invariance and the $N_s\times N_s$ lookup table}
+\label{sec:table}
+
+Because the grid is regular and $G$ depends only on $\xx-\yy$, the integral
+\eqref{eq:Sij-integral} depends only on the index offset
+$(\Delta_x,\Delta_y)=(\abs{i_x-j_x},\abs{i_y-j_y})$:
+\begin{equation}
+  S_{ij} = T[\Delta_y,\Delta_x],
+  \qquad
+  T[d_y,d_x] = \frac{1}{\pi\Es}\,\code{love\_uz}\!\big(d_x h,\, d_y h,\, \tfrac{h}{2},\tfrac{h}{2}\big).
+  \label{eq:table}
+\end{equation}
+The constructor \code{BoussinesqKernel} builds this $N_s\times N_s$ table once
+with $\Order(N)$ kernel evaluations (\code{boussinesq\_kernel.cpp:18--27}); the
+sign symmetry $S_{ij}=S_{ji}$ and reflection symmetry justify storing only
+non-negative offsets. Lookups are $\Order(1)$: \code{entry(i,j)} reduces the flat
+indices to $(\Delta_x,\Delta_y)$ (\code{:30--34}), and \code{entry\_offset(dix,diy)}
+serves a \emph{signed} offset, returning $0$ when the offset leaves the grid span
+(\code{:38--42}); the latter is what the $\Htwo$ near-field stencil cache calls
+(Section~\ref{sec:near}). The matrix $S$ is symmetric positive definite, which is
+why the contact QP below is convex.
+
+\subsection{The contact problem and the role of the operator}
+
+The discrete contact problem is the bound- and equality-constrained quadratic
+program
+\begin{equation}
+  \min_{\pp}\ \tfrac12\,\pp^\top S\,\pp + \pp^\top \mathbf g_0
+  \quad\text{s.t.}\quad \pp\ge 0,\ \ \operatorname{mean}(\pp)=\bar p,
+  \label{eq:qp}
+\end{equation}
+solved by the Polonsky--Keer projected conjugate gradient~\cite{PolKeer1999}
+(documented in \code{doc/theory/pcg.tex}). \emph{Each PCG iteration needs two
+applications of $S$} and never an individual entry, a factorisation, or the
+stored matrix. The operator is therefore required \emph{only} as a
+matrix--vector product $\mathbf u = S\pp$. This single observation selects the
+class of algorithm: anything that delivers a fast, low-memory matvec is
+admissible, and we are free to trade an exactly-formed $S$ for a controlled
+approximation of the apply.
+
+\section{The cost problem and the landscape of fast methods}
+\label{sec:cost}
+
+\subsection{Why $N$ gets large}
+
+For self-affine rough surfaces the contact pressure has structure down to the
+finest resolved wavelength, so converged results demand fine grids. With
+$N=N_s^2$, the dense matrix needs $8N^2$ bytes: $128$\,MiB at $N_s=64$,
+$2$\,GiB at $N_s=128$, $32$\,GiB at $N_s=256$, $512$\,GiB at $N_s=512$, and
+$\approx 8.8$\,TB at $N_s=1024$. A dense apply is $\Order(N^2)$ flops per
+iteration. Both are hopeless beyond a few hundred elements per side. The same
+table also shows why even storing the dense matrix once for reuse is not an
+option: it is the storage, not just the flops, that fails.
+
+\subsection{Four representations}
+
+Table~\ref{tab:landscape} summarises the candidates.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lll}
+\toprule
+representation & memory & matvec \\
+\midrule
+dense matrix                       & $\Order(N^2)$       & $\Order(N^2)$ \\
+classical $\Hmat$-matrix (ACA)     & $\Order(N\log N)$   & $\Order(N\log N)$ \\
+FFT convolution (zero-padded)      & $\Order(N)$         & $\Order(N\log N)$ \\
+$\Htwo$/FMM (this document)        & $\Order(N)$         & $\Order(N)$ \\
+\bottomrule
+\end{tabular}
+\caption{Asymptotic cost of the four representations of the apply $\mathbf u=S\pp$.}
+\label{tab:landscape}
+\end{table}
+
+\paragraph{Dense.} Exact, trivial to implement, and used in Hcontact only for
+small-$N$ tests (\code{assemble\_dense}, \code{boussinesq\_kernel.cpp:29--36}). It
+is the ground truth against which the $\Htwo$ apply is verified
+(Section~\ref{sec:accuracy}).
+
+\paragraph{Classical $\Hmat$-matrix with ACA.} A block-cluster tree partitions
+$S$ into admissible (well-separated) and inadmissible blocks; each admissible
+block $A_{ts}$ is compressed independently as a low-rank product
+$A_{ts}\approx U_{ts}V_{ts}^\top$ by adaptive cross
+approximation~\cite{Bebendorf2008,Hackbusch2015}. This works and was Hcontact's
+previous backend, but for a \emph{translation-invariant} kernel it stores
+\emph{redundant bases}: many admissible blocks at one level share the same
+relative geometry and are therefore the \emph{same} matrix, yet each is
+approximated and stored separately. Memory is $\Order(N\log N)$ with a large
+constant (e.g.\ $6.2$\,GiB at $N_s=512$ in Hcontact). The $\Htwo$/FMM design
+exists precisely to remove this redundancy.
+
+\paragraph{FFT convolution.} Because $S$ is a (block-)Toeplitz convolution on a
+regular grid, a zero-padded FFT applies it in $\Order(N\log N)$ with $\Order(N)$
+memory; this is the discrete-convolution-FFT (DC-FFT) method of Stanley and
+Kato~\cite{StanleyKato1997} and Liu, Wang and Liu~\cite{LiuWangLiu2000}, and is
+what the reference solver Tamaas implements. It is excellent for a fully active
+rectangular grid but is intrinsically \emph{global}: it cannot cheaply skip work
+outside the contact patch, and it ties the algorithm to the regular grid and
+periodic/zero-padded boundary handling. We compare against it quantitatively in
+Section~\ref{sec:valid}.
+
+\paragraph{$\Htwo$/FMM.} A nested (level-consistent) low-rank representation in
+which each cluster carries a \emph{single} interpolation basis shared by all its
+blocks, and inter-cluster coupling is a small matrix~\cite{FongDarve2009,Hackbusch2015,BoerHugesAnda2006}.
+This is the only representation with $\Order(N)$ \emph{both} in memory and in
+matvec, and -- crucially for this kernel -- its building blocks become reusable
+caches under translation invariance. It is the subject of the rest of this
+document.
+
+\subsection{From $\Hmat$ to $\Htwo$: the nestedness idea}
+
+In a classical $\Hmat$-matrix the rank-$k$ factor $U_{ts}$ of a block has its own
+column space for every pair $(t,s)$. The $\Htwo$ idea is to demand a
+\emph{nested} cluster basis: a single matrix $V_t$ per cluster $t$ (independent
+of the partner $s$) such that every admissible block factors as
+\begin{equation}
+  A_{ts} \approx V_t\, K_{ts}\, V_s^\top,
+  \label{eq:h2-factor}
+\end{equation}
+with a small coupling matrix $K_{ts}$, and such that a child basis is obtained
+from its parent's basis by a fixed transfer matrix (the M2M operator). Two
+consequences follow immediately: (i) bases are shared across all blocks of a
+cluster, eliminating the ACA redundancy; and (ii) the apply can be organised as
+an upward pass (form moments $V_s^\top \pp_s$ once per cluster), a coupling pass
+(apply $K_{ts}$), and a downward pass (expand by $V_t$), which is the FMM. The
+bbFMM realises the bases $V_t$ as polynomial-interpolation operators, so that
+\eqref{eq:h2-factor} is exactly the degenerate-kernel approximation of
+Section~\ref{sec:degenerate}, and $K_{ts}$ is simply the kernel sampled at
+interpolation nodes.
+
+\section{Hierarchical geometry: the uniform quadtree}
+\label{sec:tree}
+
+\subsection{Levels, boxes, and index ranges}
+
+The grid is partitioned by a \emph{balanced, complete} quadtree
+(\code{UniformQuadTree}, \code{uniform\_quadtree.\{hpp,cpp\}}). Level $0$ is the
+root box covering the whole grid; each box at level $l$ has four children at
+level $l+1$ obtained by bisecting in $x$ and $y$. With $N_s$ and the leaf side
+$\ell$ (\code{leaf\_side}) both powers of two and $\ell\mid N_s$, the number of
+levels is
+\begin{equation}
+  L_{\max}+1 = \log_2\!\big(N_s/\ell\big) + 1
+  \label{eq:nlevels}
+\end{equation}
+(\code{uniform\_quadtree.cpp:21}), with the leaf level $L_{\max}=$
+\code{leaf\_level()}. A box at level $l$ has side $s = N_s\gg l = N_s/2^{l}$
+elements and box-coordinates $(b_x,b_y)\in[0,2^l)^2$; it covers the element range
+\begin{equation}
+  [\,b_x s,\ (b_x{+}1)s\,)\times[\,b_y s,\ (b_y{+}1)s\,)
+\end{equation}
+(\code{:36--44}). Crucially, a box stores only this \emph{index range}
+$(i_{x0},i_{y0},\text{side})$ together with parent/child ids -- never an explicit
+list of the elements it contains. The global flat index of element $(i_x,i_y)$ is
+recovered arithmetically as $i_y N_s + i_x$, so a box is a handful of integers
+(\code{H2Box}, \code{uniform\_quadtree.hpp:11--18}). The whole tree is
+$\Order(N/\ell^2)$ tiny structs: $\sum_{l=0}^{L_{\max}} 4^l = (4^{L_{\max}+1}-1)/3
+\approx \tfrac{4}{3}(N/\ell^2)$ boxes, laid out by level via the prefix sum
+\code{level\_begin\_} (\code{:23--30}), so that \code{box\_id(level,bx,by)} is
+$\Order(1)$ (\code{uniform\_quadtree.hpp:35--37}).
+
+\begin{remark}[Index ranges vs index lists]
+A generic FMM stores, per leaf, the list of particles it owns. Here the regular
+grid lets us replace lists by ranges; this is what keeps tree memory negligible
+and lets every leaf gather/scatter its $\ell^2$ DOFs by two nested loops over
+$(l_x,l_y)$ (\code{h2\_operator.cpp:173--175, 239--247}).
+\end{remark}
+
+\subsection{Geometric extent and the $[-1,1]^2$ normalisation}
+\label{sec:extent}
+
+For interpolation, each box is mapped affinely to the reference square
+$[-1,1]^2$. Hcontact uses the box's \emph{geometric extent} (its full side
+$s\cdot h$ in physical units), not the bounding box of its element centres. The
+$k$-th element centre of a side-$s$ box maps to
+\begin{equation}
+  \hat c_k = \frac{k - s/2 + \tfrac12}{s/2}, \qquad k=0,\dots,s-1,
+  \label{eq:centers-norm}
+\end{equation}
+implemented as \code{centers\_norm(side)} in \code{h2\_operator.cpp:15--22}. The
+first and last centres map to $\pm(1-1/s)$, i.e.\ they sit just inside $\pm1$ by
+half an element, consistent with cell-centred data filling the full box.
+
+\begin{proposition}[Exact half-scaling]
+\label{prop:halfscale}
+With the geometric-extent normalisation, the reference-coordinate map of a child
+box is related to its parent's by an exact factor $1/2$ plus a fixed shift
+$\pm\tfrac12$, independent of level.
+\end{proposition}
+\begin{proof}
+A parent of side $s$ has half-extent $w=\tfrac{s h}{2}$ and centre $c$; a child
+has side $s/2$, half-extent $w/2$, and centre $c\pm w/2$ (the $\pm$ being the
+quadrant). A point at child-reference coordinate $\xi$ is at the physical point
+$(c\pm w/2)+(w/2)\xi$, which in the parent reference frame is
+$\big[(c\pm w/2)+(w/2)\xi - c\big]/w = \pm\tfrac12 + \tfrac12\xi$. The map
+$\xi\mapsto \pm\tfrac12+\tfrac12\xi$ has no dependence on $s$ or $l$.
+\end{proof}
+
+Proposition~\ref{prop:halfscale} is the geometric reason the M2M/L2L transfer
+operators collapse to four level-independent matrices
+(Section~\ref{sec:m2m}); it is precisely the shift used in
+\code{h2\_operator.cpp:47--53}, where \code{signx}, \code{signy}
+$=\pm0.5$ and the child node is placed at $\text{sign}+0.5\,\xi$.
+
+\subsection{Near/far split, admissibility, and interaction lists}
+
+Two boxes at the same level are \emph{near neighbours} when their Chebyshev
+(max-norm) box-distance is $\le r=$\code{near\_radius}: this is the
+$(2r+1)\times(2r+1)$ block centred on the box, clipped to the grid
+(\code{neighbors(box,r)}, \code{uniform\_quadtree.cpp:58--69}; the default $r=1$
+gives the $3\times3$ block). The near field is computed with the \emph{exact}
+kernel (Section~\ref{sec:near}). Everything else is handled approximately via the
+FMM \emph{interaction list}.
+
+\begin{definition}[Interaction list]
+\label{def:ilist}
+For a non-root box $t$ with parent $P(t)$, the interaction list is
+\begin{equation}
+  I(t) = \big\{\, s : s \text{ is a child of a near neighbour of } P(t),\ \
+                    s \notin \mathcal N(t) \,\big\},
+  \label{eq:ilist}
+\end{equation}
+where $\mathcal N(t)$ is the set of near neighbours of $t$. The root has
+$I=\varnothing$.
+\end{definition}
+
+This is exactly \code{interaction\_list(box,near\_radius)} in
+\code{uniform\_quadtree.cpp:71--86}: it loops over \code{neighbors(parent,r)},
+collects their children, and removes those in \code{neighbors(box,r)}. Members of
+$I(t)$ are \emph{admissible}: they are well-separated from $t$ (separated by at
+least one box width at their level) yet their parents are near, so the pair was
+\emph{not} resolved one level up. This is the standard FMM admissibility, and it
+matches the geometric criterion
+$\min(\operatorname{diam} t,\operatorname{diam} s)\le \eta\,\operatorname{dist}(t,s)$
+of $\Hmat$-theory with $\eta=\Order(1)$ (here $\eta\approx 2$ for $r=1$); see the
+discussion in Section~\ref{sec:params-eta}.
+
+\subsection{Exact tiling: every pair once}
+\label{sec:tiling}
+
+We now prove the central correctness property of the near/far split: the near
+field and the per-level interaction lists together account for every ordered
+pair of leaves exactly once.
+
+For a fixed leaf pair $(\tau,\sigma)$ let $t_l,s_l$ denote their ancestor boxes
+at level $l$ (so $t_{L_{\max}}=\tau$, $s_{L_{\max}}=\sigma$), and let
+$\delta_l=\max(\abs{b_x(t_l)-b_x(s_l)},\abs{b_y(t_l)-b_y(s_l)})$ be their box
+distance. Call the pair \emph{adjacent} at level $l$ if $\delta_l\le r$.
+
+\begin{lemma}[Monotone separation]
+\label{lem:monotone}
+If $t_l,s_l$ are non-adjacent at level $l$ (i.e.\ $\delta_l\ge r+1$), then all
+their descendants are non-adjacent: $\delta_{l'}\ge r+1$ for every $l'>l$.
+\end{lemma}
+\begin{proof}
+Child box-coordinates satisfy $b_x(t_{l+1})=2\,b_x(t_l)+c_x$ with
+$c_x\in\{0,1\}$, and similarly for $s$ and for $y$. Hence
+$\abs{b_x(t_{l+1})-b_x(s_{l+1})} = \abs{2(b_x(t_l)-b_x(s_l))+(c_x^t-c_x^s)}
+\ge 2\abs{b_x(t_l)-b_x(s_l)} - 1$, because $c_x^t-c_x^s\in\{-1,0,1\}$. Taking the
+$\max$ over the two axes, $\delta_{l+1}\ge 2\delta_l-1$. If $\delta_l\ge r+1$
+then $\delta_{l+1}\ge 2(r+1)-1 = 2r+1\ge r+1$. Induction on $l'$ gives the claim.
+\end{proof}
+
+\begin{theorem}[Exact-once coverage]
+\label{thm:coverage}
+Every ordered pair of leaves $(\tau,\sigma)$ is accounted for exactly once,
+either by the near field at the leaf level, or by the M2L step at one unique
+level.
+\end{theorem}
+\begin{proof}
+At level $0$ both ancestors are the root, so $\delta_0=0\le r$: the pair is
+adjacent at the root. By Lemma~\ref{lem:monotone}, the sequence of truth values
+``adjacent at level $l$'' is non-increasing in $l$ (once false it stays false).
+Two cases.
+
+\emph{(i) Adjacent at the leaf level} ($\delta_{L_{\max}}\le r$). Then $\sigma$
+is a near neighbour of $\tau$ and the pair is computed by the near field,
+\code{h2\_operator.cpp:235--243}; it is never in any interaction list (members of
+$I(\cdot)$ are explicitly excluded from being near neighbours, Def.~\ref{def:ilist}),
+so it is counted exactly once.
+
+\emph{(ii) Non-adjacent at the leaf level.} Let $l^\star\in\{1,\dots,L_{\max}\}$
+be the unique level where the truth value flips: adjacent at $l^\star-1$
+($\delta_{l^\star-1}\le r$) and non-adjacent at $l^\star$
+($\delta_{l^\star}\ge r+1$); uniqueness is exactly the monotonicity. At level
+$l^\star$, the parents $P(t_{l^\star})=t_{l^\star-1}$ and
+$P(s_{l^\star})=s_{l^\star-1}$ are near neighbours, while $t_{l^\star}$ and
+$s_{l^\star}$ are not. By Def.~\ref{def:ilist}, $s_{l^\star}\in I(t_{l^\star})$,
+so the pair's contribution is carried by the M2L coupling at level $l^\star$
+(the source leaf's value flows up via M2M into $s_{l^\star}$, across via
+$K_{t_{l^\star}s_{l^\star}}$, and down via L2L into $\tau$). At every level
+$l<l^\star$ the ancestors are adjacent, so $s_l\notin I(t_l)$; at every level
+$l>l^\star$ the ancestors are non-adjacent \emph{but their parents are also
+non-adjacent} (by Lemma~\ref{lem:monotone} applied to level $l-1\ge l^\star$),
+so $s_l\notin I(t_l)$ there as well. Hence the pair appears in exactly one
+interaction list, at level $l^\star$.
+\end{proof}
+
+Theorem~\ref{thm:coverage} guarantees that the FMM apply computes
+$\mathbf u=S\pp$ with no double counting and no omission; the only error is the
+interpolation error on the far blocks (Section~\ref{sec:accuracy}), since the
+near blocks use the exact kernel.
+
+\section{Degenerate-kernel and Chebyshev interpolation theory}
+\label{sec:degenerate}
+
+\subsection{Why a smooth far block is numerically low rank}
+
+Let $t$ and $s$ be well-separated boxes and consider the kernel restricted to
+them, $g(\xx,\yy)$ for $\xx\in t$, $\yy\in s$. A \emph{degenerate} (separable)
+approximation of rank $r$ is
+\begin{equation}
+  g(\xx,\yy)\approx \sum_{m=1}^{r} \phi_m(\xx)\,\psi_m(\yy).
+  \label{eq:degenerate}
+\end{equation}
+If such an approximation holds with error $\varepsilon$, then the corresponding
+matrix block $A_{ts}$, with entries $g(\xx_i,\yy_j)$, is within $\varepsilon$ (in
+the entrywise sense, hence up to grid factors in norm) of a rank-$r$ matrix:
+$A_{ts}\approx \Phi\,\Psi^\top$ with $\Phi_{im}=\phi_m(\xx_i)$,
+$\Psi_{jm}=\psi_m(\yy_j)$. Thus \emph{smoothness of $g$ on a separated pair
+implies numerical low rank of the block}. For the analytic half-space kernel the
+relevant approximation is polynomial interpolation, and the rank is the number
+of interpolation nodes.
+
+\subsection{Chebyshev nodes and the interpolation operator}
+\label{sec:cheb}
+
+The bbFMM realises \eqref{eq:degenerate} by interpolating $g$ in each argument at
+Chebyshev points. Hcontact uses the Chebyshev points of the first kind on
+$[-1,1]$,
+\begin{equation}
+  \xi_m = \cos\!\Big(\frac{(2m+1)\pi}{2q}\Big), \qquad m=0,\dots,q-1,
+  \label{eq:cheb-nodes}
+\end{equation}
+the roots of the degree-$q$ Chebyshev polynomial $T_q$ (\code{ChebBasis},
+\code{cheb\_basis.cpp:7--10}). For a function $f$ on $[-1,1]$ the degree-$(q{-}1)$
+interpolant through these nodes can be written with the closed-form Lagrange-type
+weights
+\begin{equation}
+  f(t) \approx \sum_{m=0}^{q-1} S_q(t,\xi_m)\, f(\xi_m),
+  \qquad
+  S_q(t,\xi_m) = \frac{1}{q} + \frac{2}{q}\sum_{n=1}^{q-1} T_n(\xi_m)\,T_n(t),
+  \label{eq:Sq}
+\end{equation}
+where $T_n(\cos\theta)=\cos(n\theta)$ are the Chebyshev polynomials. This is the
+weight returned by \code{ChebBasis::weights(t)} (\code{cheb\_basis.cpp:13--36}),
+which builds the vector $w_m=S_q(t,\xi_m)$ by the three-term recurrence for
+$T_n(\xi_m)$ and $T_n(t)$. Equation~\eqref{eq:Sq} is the discrete-cosine form of
+the interpolation operator and is \emph{exact for all polynomials of degree
+$<q$} (it reproduces each $T_n$, $n<q$, by orthogonality of the Chebyshev
+polynomials at the first-kind nodes).
+
+\begin{remark}[Interpolation operator, not the kernel]
+$S_q$ is a property of the node set, not of $g$. It supplies the smooth
+``shape functions'' $\phi_m(\xx)=S_q(\hat x,\xi_m)$ in \eqref{eq:degenerate}.
+This is precisely what makes the method \emph{black-box}: the basis is
+kernel-independent; only the coupling samples $g(\xi_a^t,\xi_b^s)$ depend on $g$.
+\end{remark}
+
+\subsection{Near-minimax property and spectral convergence}
+
+Chebyshev interpolation is near-optimal among polynomial interpolants. Its
+Lebesgue constant grows only logarithmically,
+$\Lambda_q = \tfrac{2}{\pi}\ln q + \Order(1)$, so the interpolation error is
+within a factor $\Lambda_q$ of the best degree-$(q{-}1)$ polynomial
+approximation~\cite{Trefethen2013}. For analytic functions the best
+approximation -- hence the interpolation error -- decays \emph{geometrically} in
+$q$.
+
+\begin{theorem}[Spectral convergence for analytic kernels]
+\label{thm:cheb-conv}
+Let $f$ be analytic on $[-1,1]$ and analytically continuable to the Bernstein
+ellipse $E_\rho$ (foci $\pm1$, semi-axis sum $\rho>1$), with $\abs{f}\le M$ on
+$E_\rho$. Then the degree-$(q{-}1)$ Chebyshev interpolant $p_{q-1}$ satisfies
+\begin{equation}
+  \norm{f-p_{q-1}}_{\infty,[-1,1]} \;\le\; \frac{4M}{\rho-1}\,\rho^{-(q-1)}.
+  \label{eq:cheb-bound}
+\end{equation}
+\end{theorem}
+This is the standard Chebyshev-interpolation estimate
+(Trefethen~\cite{Trefethen2013}, Thm.~8.2). For two boxes separated by at least
+their own width, the kernel $g(\xx,\yy)=1/(\pi\Es\abs{\xx-\yy})$ extends
+analytically in each variable to an ellipse with $\rho>1$ bounded away from $1$
+by the separation ratio; the larger the separation, the larger $\rho$, and the
+faster the decay. The practical consequence is the geometric error reduction in
+$q$ measured for Hcontact: relative $L_2$ matvec error
+$1.3\times10^{-4}$ at $q=4$ falling to $3.2\times10^{-6}$ at $q=6$
+(Section~\ref{sec:accuracy}), i.e.\ roughly a factor $40$ per two extra orders,
+the signature of a geometric rate.
+
+\subsection{Tensor product in 2-D and the rank $r=q^2$}
+
+In two dimensions the interpolation operator is the tensor product of the 1-D
+operator on each axis. For a target box, a point $\xx=(x,y)$ with reference
+coordinates $(\hat x,\hat y)$ has the 2-D weights
+\begin{equation}
+  S_q^{(2)}\big(\xx,\boldsymbol\xi_A\big)
+  = S_q(\hat x,\xi_{A_x})\,S_q(\hat y,\xi_{A_y}),
+  \qquad A=(A_x,A_y),\ \ A_x,A_y\in\{0,\dots,q-1\},
+  \label{eq:tensor}
+\end{equation}
+so the node set is the $q\times q$ Chebyshev grid $\boldsymbol\xi_A=(\xi_{A_x},
+\xi_{A_y})$, and the per-box rank is
+\begin{equation}
+  r = q^2
+\end{equation}
+(\code{q2\_ = q*q}, \code{h2\_operator.cpp:11}). The tensor structure is the key
+to efficiency: rather than forming an $r\times\ell^2$ matrix and applying it as a
+Kronecker product, each operator is applied as \emph{two sequential 1-D passes},
+turning $\Order(r\,\ell^2)$ work into $\Order(q\,\ell^2 + q^2\ell)$ -- see the
+$W^\top X W$ form in Section~\ref{sec:p2m}.
+
+\section{The black-box FMM: derivation of the five transfer operators}
+\label{sec:bbfmm}
+
+We now derive P2M, M2M, M2L, L2L, L2P from the interpolation
+\eqref{eq:tensor}--\eqref{eq:Sq}, and exhibit the small-matrix forms exactly as
+they appear in \code{h2\_operator.cpp}. Throughout, capital indices $A,B$ run over
+the $q^2$ Chebyshev nodes of a box; lowercase $l_x,l_y$ over the $\ell^2$ leaf
+DOFs.
+
+\subsection{The far interaction in interpolated form}
+
+Fix an admissible target/source pair $(t,s)$ at a common level, with reference
+maps $\xx=c_t+w_t\boldsymbol\xi$ and $\yy=c_s+w_s\boldsymbol\xi$ ($w$ the
+half-extent, $c$ the centre). Interpolating $g$ in \emph{both} arguments on the
+node grid gives the degenerate approximation
+\begin{equation}
+  g(\xx,\yy)\;\approx\;
+  \sum_{A}\sum_{B} S_q^{(2)}(\xx,\boldsymbol\xi_A^{\,t})\,
+  g\big(\boldsymbol\xi_A^{\,t},\boldsymbol\xi_B^{\,s}\big)\,
+  S_q^{(2)}(\yy,\boldsymbol\xi_B^{\,s}),
+  \label{eq:far-interp}
+\end{equation}
+where $\boldsymbol\xi_A^{\,t}=c_t+w_t\boldsymbol\xi_A$ are the physical node
+positions of box $t$. Substituting into the far part of the apply,
+$u(\xx_i)=\sum_{j\in s} g(\xx_i,\yy_j)\,p_j$, and regrouping:
+\begin{equation}
+  u(\xx_i)\ \approx\
+  \underbrace{\sum_A S_q^{(2)}(\xx_i,\boldsymbol\xi_A^{\,t})}_{\text{L2P}}
+  \;\underbrace{\sum_B g(\boldsymbol\xi_A^{\,t},\boldsymbol\xi_B^{\,s})}_{\text{M2L}}
+  \;\underbrace{\sum_{j\in s} S_q^{(2)}(\yy_j,\boldsymbol\xi_B^{\,s})\,p_j}_{\text{P2M}}.
+  \label{eq:regroup}
+\end{equation}
+The three braces are exactly the three leaf-level FMM operators; the upward and
+downward tree passes (M2M, L2L) merely move the moment/local coefficients between
+levels so that each $(t,s)$ pair is touched at its $l^\star$ (Theorem~\ref{thm:coverage}).
+
+\subsection{P2M: pressure to moments (anterpolation)}
+\label{sec:p2m}
+
+The moment of source leaf $s$ at node $B$ is
+$M_B^s = \sum_{j\in s} S_q^{(2)}(\yy_j,\boldsymbol\xi_B^{\,s})\,p_j$. Using the
+tensor split \eqref{eq:tensor} and arranging the $\ell^2$ leaf values as a matrix
+$X_s$ with $X_s[l_y,l_x]=p_{(l_x,l_y)}$,
+\begin{equation}
+  M^s = W^\top X_s\, W, \qquad W \equiv W_{\text{leaf}}\in\R^{\ell\times q},\quad
+  W[l,a]=S_q(\hat c_l,\xi_a),
+  \label{eq:p2m}
+\end{equation}
+where $\hat c_l$ are the normalised leaf centres \eqref{eq:centers-norm}. The
+matrix $W_{\text{leaf}}$ is built once as
+\code{cheb\_.weights\_at(centers\_norm(ls\_))} (\code{h2\_operator.cpp:43}), and
+the apply is \code{Wleaf\_.transpose() * Xs * Wleaf\_} returning a $q\times q$
+block (\code{:176}), then flattened to the length-$q^2$ vector
+$M_t(a_x+q\,a_y)=M^{\text{mat}}(a_y,a_x)$ (\code{:177--180}). The name
+\emph{anterpolation} reflects that this is the transpose of interpolation: it
+``spreads'' the point values onto polynomial coefficients.
+
+\subsection{M2M: child moments to parent (upward pass)}
+\label{sec:m2m}
+
+A parent's moments are obtained by re-interpolating its children's moments. The
+$B$-th node of child $c$ sits, in the parent's reference frame, at
+$\boldsymbol\xi^{\,(\text{par})}=\mathbf{sign}_c/2 + \tfrac12\boldsymbol\xi_B$
+(Proposition~\ref{prop:halfscale}), where $\mathbf{sign}_c=(\pm\tfrac12,\pm\tfrac12)$
+selects the quadrant. Re-interpolating onto the parent nodes,
+\begin{equation}
+  M^{\text{par}}_A \mathrel{+}= \sum_{B} R^{(c)}_{A,B}\, M^{\text{child}}_B,
+  \qquad
+  R^{(c)}_{A,B} = w_{A_x}\!\big(\tfrac{\text{sign}^x_c}{1}+\tfrac12\xi_{B_x}\big)\,
+                  w_{A_y}\!\big(\tfrac{\text{sign}^y_c}{1}+\tfrac12\xi_{B_y}\big),
+  \label{eq:m2m}
+\end{equation}
+where $w_{A}(\cdot)=S_q(\cdot,\xi_A)$. In the code (\code{h2\_operator.cpp:46--64})
+this is built per child quadrant $c\in\{0,1,2,3\}$ with
+\code{signx=(c\&1)?0.5:-0.5}, \code{signy=(c\&2)?0.5:-0.5}, the per-axis weight
+vectors \code{Wx[a]=cheb\_.weights(signx+0.5*nodes[a])} (\code{:52--53}), and the
+filled matrix \code{R(A, ax+q*ay)=Wx[ax](Ax)*Wy[ay](Ay)} with $A=A_x+q A_y$
+(\code{:55--62}). The apply is \code{acc += R\_[c] * M[child]}
+(\code{:191--195}), summed over the four children, sweeping from the finest
+non-leaf level up to the root (\code{:184--197}).
+
+By Proposition~\ref{prop:halfscale} the four matrices $R^{(c)}$ are
+\emph{independent of level}: there are exactly four $q^2\times q^2$ M2M matrices,
+reused at every level. This is the first half of the translation-invariant
+collapse (Section~\ref{sec:cache}).
+
+\subsection{M2L: source to target coupling (the kernel-dependent step)}
+\label{sec:m2l}
+
+The local expansion at a target box accumulates, over its interaction list, the
+kernel sampled at node pairs:
+\begin{equation}
+  L^t_A \mathrel{+}= \sum_{s\in I(t)}\sum_B K^{ts}_{A,B}\, M^s_B,
+  \qquad
+  K^{ts}_{A,B} = g\big(\boldsymbol\xi_A^{\,t}-\boldsymbol\xi_B^{\,s}\big).
+  \label{eq:m2l}
+\end{equation}
+Because $g$ is translation invariant, the coupling depends only on the node
+\emph{difference}. With node coordinate $=$ centre $+\,b_h\,\xi$ where
+$b_h=\tfrac12\,\text{side}\,h$ is the box half-extent, and the centre offset
+between $t$ and $s$ equal to $(\Delta b_x,\Delta b_y)\cdot\text{side}\cdot h$, the
+argument is
+\begin{equation}
+  \mathbf D = \big(\Delta b_x\,\text{side}\,h + b_h(\xi_{A_x}-\xi_{B_x}),\
+                   \Delta b_y\,\text{side}\,h + b_h(\xi_{A_y}-\xi_{B_y})\big),
+  \quad K^{ts}_{A,B}=g(\mathbf D).
+  \label{eq:m2l-D}
+\end{equation}
+This is built verbatim in \code{h2\_operator.cpp:80--96}: \code{Dx = dbx*side*h +
+bh*(nodes[Ax]-nodes[Bx])}, \code{Dy} analogous, with
+\code{K(A, Bx+q*By) = far\_kernel(Dx,Dy)} and $b_h=$\code{0.5*side*h}. The far
+point kernel is \code{far\_kernel(dx,dy) = scale * love\_uz(dx,dy,0.5h,0.5h)},
+\code{scale} $=1/(\pi\Es)$ (\code{:24--26}) -- i.e.\ the \emph{same} Love cell
+integral as the near field, evaluated at continuous node offsets
+(Section~\ref{sec:lovefar}). The apply is grouped by target,
+\code{acc += couplings\_[fi.coupling\_id] * M[fi.source\_box]}
+(\code{:200--206}).
+
+\begin{remark}[Why M2L is the only kernel-dependent operator]
+P2M, M2M, L2L, L2P are assembled purely from the interpolation operator $S_q$ and
+the box geometry; they would be identical for \emph{any} kernel. Only M2L
+evaluates $g$. This is the defining structure of bbFMM: the kernel enters through
+a single family of small matrices $K^{ts}$, which is what makes the method
+black-box (works for any smooth $g$ via evaluations) and what makes the
+translation-invariant caching so effective (Section~\ref{sec:cache}).
+\end{remark}
+
+\subsection{L2L: parent local to children (downward pass)}
+
+L2L is the adjoint of M2M: the same transfer matrix moves local coefficients the
+other way, parent to child,
+\begin{equation}
+  L^{\text{child}}_B \mathrel{+}= \sum_A R^{(c)}_{A,B}\, L^{\text{par}}_A
+  \;=\; \big(R^{(c)\top} L^{\text{par}}\big)_B.
+  \label{eq:l2l}
+\end{equation}
+In code, the child's quadrant is recovered from its parity
+\code{c = (bx\&1) + 2*(by\&1)} and the update is
+\code{L[b] += R\_[c].transpose() * L[parent]} (\code{h2\_operator.cpp:209--218}),
+sweeping from level $1$ down to the leaves. The use of the \emph{transpose} of
+the very same $R^{(c)}$ that drives M2M is what makes the whole operator
+symmetric (Section~\ref{sec:complexity}, Remark~\ref{rem:symmetry}).
+
+\subsection{L2P: target local to displacement}
+
+Finally the local expansion is evaluated at the target leaf's DOFs. With the
+local coefficients reshaped to a $q\times q$ matrix $L^{\text{mat}}$, the tensor
+interpolation back to the $\ell\times\ell$ leaf grid is
+\begin{equation}
+  Y_t = W\, L^{\text{mat}}\, W^\top, \qquad
+  u_{(l_x,l_y)} \mathrel{+}= Y_t[l_y,l_x],
+  \label{eq:l2p}
+\end{equation}
+implemented as \code{Yt = Wleaf\_ * Lmat * Wleaf\_.transpose()}
+(\code{h2\_operator.cpp:226--231}). Note that L2P uses $W$ where P2M used
+$W^\top$: again the two leaf operators are mutual transposes.
+
+\subsection{The near field}
+\label{sec:near}
+
+For each leaf $t$ and each near neighbour $s\in\mathcal N(t)$ the exact
+contribution is a dense $\ell^2\times\ell^2$ block of $S$,
+\begin{equation}
+  A^{\text{near}}_{(l_x^t,l_y^t),(l_x^s,l_y^s)}
+  = T\big[\,\abs{(l_y^t-l_y^s)-\Delta y\,\ell}\,,\ \abs{(l_x^t-l_x^s)-\Delta x\,\ell}\,\big],
+  \label{eq:near}
+\end{equation}
+served from the lookup table $T$ via \code{kernel\_->entry\_offset(lxt - lxs -
+dx*ls, lyt - lys - dy*ls)}, where $(\Delta x,\Delta y)=(b_x(s)-b_x(t),
+b_y(s)-b_y(t))$ is the source-minus-target leaf offset
+(\code{h2\_operator.cpp:113--130}). The apply gathers the source leaf's
+$\ell^2$ values and does a dense matvec
+\code{yloc += near\_stencils\_[ni.stencil\_id] * xs}
+(\code{:235--243}), added to the L2P result (\code{:245--247}). Because the near
+field uses the exact table entries, it contributes \emph{zero} approximation
+error; all error is confined to the far interpolation.
+
+\subsection{The six passes, assembled}
+
+A matvec $\mathbf u = S\pp$ is, in order
+(\code{h2\_operator.cpp:157--251}),
+\[
+  \text{P2M}\ \longrightarrow\ \text{M2M}\!\uparrow\ \longrightarrow\
+  \text{M2L}\ \longrightarrow\ \text{L2L}\!\downarrow\ \longrightarrow\
+  \text{L2P}\ \;+\;\ \text{near}.
+\]
+P2M fills the leaf moments $M$; M2M accumulates them up the tree; M2L produces
+the local coefficients $L$ from far interactions; L2L pushes them down to the
+leaves; L2P evaluates them; and the near pass adds the exact short-range part. The
+moment/local buffers $M,L\in\R^{q^2}$ are allocated per box (\code{:160--164}).
+All passes are OpenMP-parallel over boxes or leaves; the leaf passes
+(P2M and L2P+near) write disjoint output ranges and so need no synchronisation
+(\code{:168, 187, 200, 212, 221}).
+
+\section{Translation-invariant caching: the decisive optimisation}
+\label{sec:cache}
+
+The bbFMM as derived is already $\Order(N)$ in work, but a \emph{generic} bbFMM
+stores M2L matrices per interaction and M2M matrices per box, giving $\Order(N)$
+or $\Order(N\log N)$ \emph{stored} small matrices with a sizeable constant. On a
+uniform grid with a translation-invariant kernel, three collapses reduce this to
+$\Order(\log N)+\Order(1)$ distinct matrices.
+
+\begin{proposition}[M2M/L2L collapse]
+\label{prop:m2m-cache}
+With geometric-extent normalisation, there are exactly four distinct M2M matrices
+$R^{(0)},\dots,R^{(3)}$ (one per child quadrant), independent of level, and the
+four L2L matrices are their transposes.
+\end{proposition}
+\begin{proof}
+By Proposition~\ref{prop:halfscale} the child-to-parent reference map is
+$\xi\mapsto \mathbf{sign}_c/2+\tfrac12\xi$ for every level. Substituting into
+\eqref{eq:m2m} shows $R^{(c)}$ depends only on $c$ and $q$, not on the level or
+the box. There are four quadrants, hence four matrices. L2L uses $R^{(c)\top}$
+by \eqref{eq:l2l}.
+\end{proof}
+In the code these four matrices are the array \code{R\_} of length $4$, built once
+in \code{build()} (\code{h2\_operator.cpp:46--64}).
+
+\begin{proposition}[M2L collapse]
+\label{prop:m2l-cache}
+The coupling $K^{ts}$ depends only on the triple $(\text{level},\Delta b_x,
+\Delta b_y)$. The number of distinct couplings is $\Order(\log N)$.
+\end{proposition}
+\begin{proof}
+From \eqref{eq:m2l-D}, $K^{ts}$ is a function of $b_h$ (set by the level via
+$\text{side}=N_s\gg l$) and the integer offset $(\Delta b_x,\Delta b_y)$ only;
+translation invariance removes any dependence on the absolute box position. The
+interaction list \eqref{eq:ilist} has a \emph{bounded} number of distinct
+offsets per level (for $r=1$ at most $(2\cdot3+1)^2-(2\cdot1+1)^2$ patterns,
+i.e.\ a constant), and there are $L_{\max}+1=\Order(\log N)$ levels; hence
+$\Order(\log N)$ distinct couplings.
+\end{proof}
+The cache is keyed by the packed integer \code{far\_key(level,dbx,dby)}
+(\code{h2\_operator.cpp:29--33}); each new key creates one $q^2\times q^2$ matrix
+and stores its id, reused by all interactions with the same key
+(\code{:68--102}). The number of stored couplings is \code{n\_unique\_couplings}.
+
+\begin{proposition}[Near-stencil collapse]
+\label{prop:near-cache}
+There are at most $(2r+1)^2$ distinct near stencils, indexed by the relative leaf
+offset $(\Delta x,\Delta y)$; this is $\Order(1)$.
+\end{proposition}
+\begin{proof}
+By \eqref{eq:near} the near block depends only on $(\Delta x,\Delta y)$, which
+ranges over the $(2r+1)\times(2r+1)$ neighbourhood. Boundary leaves see a subset
+of these offsets, so the count is at most $(2r+1)^2$.
+\end{proof}
+The cache is keyed by \code{near\_key(dx,dy)} (\code{h2\_operator.cpp:34--36}),
+storing each $\ell^2\times\ell^2$ block once (\code{:109--138}); the count is
+\code{n\_near\_stencils} (for $r=1$, nine interior stencils, the constant
+$0.28$\,MiB cache reported in the concise note).
+
+\begin{remark}[Contrast with classical $\Hmat$]
+A classical $\Hmat$-matrix stores an independent $U_{ts},V_{ts}$ pair for every
+admissible block, i.e.\ $\Order(N\log N)$ floating-point factors. The three
+propositions replace this by $\Order(\log N)$ couplings $+\,\Order(1)$ stencils
+$+\,4$ transfer matrices. This is the structural reason the $\Htwo$ operator
+attains $\Order(N)$ \emph{memory} (the only $\Order(N)$ term being the
+coefficient buffers $M,L$), with a small constant.
+\end{remark}
+
+\subsection{The Love far kernel, not $1/r$}
+\label{sec:lovefar}
+
+The far point kernel is taken to be the Love cell integral
+$g(\mathbf d)=\code{love\_uz}(\mathbf d,h/2,h/2)/(\pi\Es)$
+(\code{h2\_operator.cpp:24--26}), \emph{not} the bare point kernel
+$1/(\pi\Es\abs{\mathbf d})$. The reason is consistency: the near field uses the
+exact integrated entries $T$, so using the \emph{same} integrated kernel for the
+far field makes the near and far representations of $S$ agree on the underlying
+operator. Consequently the only far-field error is the interpolation error of
+$g$ (Theorem~\ref{thm:cheb-conv}); there is no mismatch between a ``point'' far
+model and an ``integrated'' near model. Since $g$ is just as smooth as $1/r$ away
+from the origin (it differs by an $\Order(h^2)$ smoothing at the scale of one
+cell, negligible at admissible separations), the interpolation rate is unchanged.
+
+\section{Complexity and memory}
+\label{sec:complexity}
+
+\subsection{Operation counts}
+
+Let $n_{\text{box}}\approx\tfrac43 N/\ell^2$ and $n_{\text{leaf}}=N/\ell^2$. Each
+pass costs:
+\begin{itemize}
+\item \textbf{P2M / L2P}: two 1-D contractions $W^\top X W$ per leaf, costing
+$\Order(q\ell^2 + q^2\ell)$; total $\Order\!\big((N/\ell^2)(q\ell^2+q^2\ell)\big)
+= \Order(Nq + Nq^2/\ell)=\Order(N)$.
+\item \textbf{M2M / L2L}: up to four $q^2\times q^2$ matvecs per box,
+$\Order(q^4)$ each; total $\Order(n_{\text{box}}\,q^4)=\Order(N\,q^4/\ell^2)
+=\Order(N)$.
+\item \textbf{M2L}: $\Order(q^4)$ per far interaction; the number of far
+interactions is $\Order(n_{\text{box}})$ because each interaction list has bounded
+size; total $\Order(N\,q^4/\ell^2)=\Order(N)$.
+\item \textbf{Near}: up to $(2r+1)^2$ dense $\ell^2\times\ell^2$ matvecs per leaf,
+$\Order(\ell^4)$ each; total $\Order(n_{\text{leaf}}(2r+1)^2\ell^4)
+=\Order\!\big(N(2r+1)^2\ell^2\big)=\Order(N)$.
+\end{itemize}
+Every pass is $\Order(N)$, so the matvec is $\Order(N)$. The near pass carries the
+largest constant ($\propto (2r+1)^2\ell^2$), which is why $\ell$ and $r$ are kept
+small (Section~\ref{sec:params}).
+
+\subsection{Storage}
+
+The exact byte counts are computed in \code{h2\_operator.cpp:151--154}:
+\begin{equation}
+\begin{aligned}
+  \text{bytes}_{\text{coupling}} &= 8\,n_{\text{couplings}}\,q^4
+     &&= \Order(q^4\log N),\\
+  \text{bytes}_{\text{near}} &= 8\,n_{\text{stencils}}\,\ell^4
+     &&= \Order(\ell^4) = \Order(1),\\
+  \text{bytes}_{\text{buffers}} &= 8\cdot 2\,n_{\text{box}}\,q^2
+     &&= \Order(N\,q^2/\ell^2) = \Order(N).
+\end{aligned}
+\label{eq:bytes}
+\end{equation}
+The coefficient buffers dominate asymptotically. Their cost per DOF is
+\begin{equation}
+  \frac{\text{bytes}_{\text{buffers}}}{N}
+  = \frac{8\cdot2\cdot\tfrac43 (N/\ell^2)\,q^2}{N}
+  = \frac{64}{3}\,\frac{q^2}{\ell^2}\ \text{bytes/DOF},
+\end{equation}
+which for the defaults $q=6,\ell=8$ is $\tfrac{64}{3}\cdot\tfrac{36}{64}=12$
+bytes/DOF, matching the $\approx 13$ bytes/DOF asymptote quoted in the concise
+note (the small excess is the $\Order(\log N)$ coupling cache). Total memory is
+$\Order(N)$ with a tiny constant: e.g.\ $1.12$\,MiB at $N_s=64$, $5.26$\,MiB at
+$N_s=512$, and $51$\,MiB at $N_s=2048$, versus $128$\,TiB for the dense matrix at
+$N_s=2048$ (Table~\ref{tab:mem}). The near-stencil cache is a constant
+$0.28$\,MiB.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{rrrrrr}
+\toprule
+$N_s$ & $N$ & coupling & buffers & total & dense $N^2$ \\
+      &     & [MiB]    & [MiB]   & [MiB] & [MiB] \\
+\midrule
+64   & 4\,096      & 0.79 & 0.05 & 1.12  & 128 \\
+128  & 16\,384     & 1.19 & 0.19 & 1.66  & 2\,048 \\
+256  & 65\,536     & 1.58 & 0.75 & 2.61  & 32\,768 \\
+512  & 262\,144    & 1.98 & 3.00 & 5.26  & 524\,288 \\
+1024 & 1\,048\,576 & 2.37 & 12.0 & 14.65 & 8\,388\,608 \\
+2048 & 4\,194\,304 & 2.77 & 48.0 & 51.05 & 134\,217\,728 \\
+\bottomrule
+\end{tabular}
+\caption{$\Htwo$ operator memory ($q=6$, $\ell=8$, $r=1$) from
+\code{bench\_h2\_memory.py}, reproduced from the concise note. The coupling cache
+grows like $\log N$, the buffers like $N$; total memory crosses below the dense
+cost by orders of magnitude.}
+\label{tab:mem}
+\end{table}
+
+\begin{remark}[Symmetry of the operator]
+\label{rem:symmetry}
+Because L2P $=W(\cdot)W^\top$ is the transpose of P2M $=W^\top(\cdot)W$, L2L
+$=R^{(c)\top}$ is the transpose of M2M $=R^{(c)}$, the near stencils are
+symmetric ($T$ is even in each offset), and M2L is symmetric under
+$t\leftrightarrow s$ (which negates $\mathbf D$, and $g$ is even), the assembled
+$\Htwo$ apply is a \emph{symmetric} linear operator -- consistent with the SPD
+matrix $S$ it approximates, and required by the conjugate-gradient solver.
+\end{remark}
+
+\subsection{Measured scaling}
+
+Table~\ref{tab:cputime} (from the concise note, \code{bench\_h2\_cputime.py},
+$q=6$, $20$-core node) confirms the linear scaling of build and matvec up to
+$N_s=16384$ ($N\approx2.7\times10^8$). Each $4\times$ increase in $N$ multiplies
+both build and matvec time by $\approx4$, the signature of $\Order(N)$. The
+largest operator builds in $14$\,s, applies in $6$\,s, and fits in $14$\,GiB --
+about $57$ bytes/DOF peak RSS (of which $\approx12$ are the intrinsic buffers, the
+rest interaction-list indices and interpreter overhead).
+
+\begin{table}[h]
+\centering
+\begin{tabular}{rrrrrrr}
+\toprule
+$N_s$ & $N$ & build [s] & matvec [s] & RSS [GiB] & solve [s] & iters \\
+\midrule
+128   & 16\,384       & 0.007 & 0.0005 & 0.04 & 0.21 & 90 \\
+256   & 65\,536       & 0.011 & 0.0013 & 0.05 & 0.80 & 199 \\
+512   & 262\,144      & 0.023 & 0.0052 & 0.08 & 3.64 & 241 \\
+1024  & 1\,048\,576   & 0.064 & 0.019  & 0.19 & 48.0 & 906 \\
+2048  & 4\,194\,304   & 0.245 & 0.098  & 0.26 & ---  & --- \\
+4096  & 16\,777\,216  & 0.92  & 0.34   & 0.92 & ---  & --- \\
+8192  & 67\,108\,864  & 3.65  & 1.39   & 3.57 & ---  & --- \\
+16384 & 268\,435\,456 & 13.98 & 6.06   & 14.2 & ---  & --- \\
+\bottomrule
+\end{tabular}
+\caption{$\Htwo$ CPU-time study ($q=6$, all cores) reproduced from the concise
+note. Build and per-matvec scale $\approx\Order(N)$. Full rough-surface solves are
+listed to $N_s=1024$; beyond that the projected-CG iteration count, not the
+operator, becomes the limiting cost, so only operator metrics are reported.}
+\label{tab:cputime}
+\end{table}
+
+\section{Accuracy analysis}
+\label{sec:accuracy}
+
+\subsection{Where the error lives}
+
+By Theorem~\ref{thm:coverage} the near field is exact; by
+Section~\ref{sec:lovefar} the far field uses the same integrated kernel as the
+near field. Therefore the \emph{only} error in the apply is the tensor-Chebyshev
+interpolation error of the far blocks, governed by Theorem~\ref{thm:cheb-conv}.
+This error is uniform in $N$ (it depends on $q$ and the admissibility separation,
+not on the grid size), so the relative matvec accuracy is essentially constant as
+$N$ grows -- exactly what makes the method trustworthy at the largest grids,
+where no dense ground truth is available.
+
+\subsection{Measured interpolation error versus $q$}
+
+Against the exact dense Love operator at $N_s=32$
+(\code{tests/test\_h2.cpp}) the relative $L_2$ matvec error is
+\begin{center}
+\begin{tabular}{ccc}
+\toprule
+$q$ & rank $r=q^2$ & rel.\ $L_2$ matvec error \\
+\midrule
+4 & 16 & $1.3\times10^{-4}$ \\
+6 & 36 & $3.2\times10^{-6}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+The roughly $40\times$ drop for two extra orders is the geometric rate predicted
+by \eqref{eq:cheb-bound}. Plugged into the same PCG, the $\Htwo$ backend
+reproduces the Hertz contact radius and peak pressure
+($a_{\text{num}}/a_{\text{Hertz}}=1.016$, $p_{\max}/p_0=0.998$, from the
+project's validated numbers) and matches the classical $\Hmat$-matrix contact
+area.
+
+\subsection{Effect of the near radius}
+
+Increasing $r$ enlarges the exact near field and shrinks the interpolated far
+field, so it can only \emph{improve} far accuracy (admissible pairs become more
+separated, raising the Bernstein $\rho$). But near cost grows like $(2r+1)^2$
+(Section~\ref{sec:complexity}). With the Love far kernel the default $r=1$ already
+delivers $3\times10^{-6}$ at $q=6$, so $r$ is not needed as an accuracy knob; it
+is fixed at the minimum that keeps the interaction lists non-degenerate.
+
+\section{Justification of every parameter and design choice}
+\label{sec:params}
+
+\subsection{Chebyshev order $q$ (default $6$)}
+$q$ sets the rank $r=q^2$ and the accuracy. From \eqref{eq:cheb-bound} accuracy
+improves geometrically, while M2M/M2L cost grows like $q^4$ and buffers like
+$q^2$. The default $q=6$ ($r=36$) sits at the knee: $\sim10^{-6}$ matvec accuracy
+at a few MiB. $q=4$ ($r=16$) is the fast/low-memory setting at $\sim10^{-4}$;
+$q\ge8$ buys little for this kernel because the PCG tolerance and the discretisation
+error dominate well before the interpolation error.
+
+\subsection{Leaf side $\ell$ (default $8$, $64$ DOF/leaf)}
+\label{sec:params-leaf}
+$\ell$ trades near against far work. Larger $\ell$ shrinks the tree (fewer boxes,
+smaller buffers, $\propto 1/\ell^2$) but inflates the dense near blocks
+($\propto\ell^4$ per leaf, $\propto\ell^2$ per DOF). The choice $\ell=8$ keeps
+the near matvec ($\propto(2r+1)^2\ell^2 = 9\cdot64$) comparable to the far cost
+and gives the $\approx12$ bytes/DOF asymptote with $q=6$. It must be a power of
+two dividing $N_s$ (\code{uniform\_quadtree.cpp:16--19}).
+
+\subsection{Near radius $r$ / admissibility $\eta$ (default $r=1$)}
+\label{sec:params-eta}
+$r=1$ is the smallest radius for which the interaction list is well-defined and
+admissible boxes are separated by at least one box width, corresponding to the
+$\Hmat$ admissibility parameter $\eta\approx 2$ (diameter $\le \eta\times$
+distance). Smaller is impossible; larger only shifts work from far to near at no
+accuracy benefit given the Love far kernel (Section~\ref{sec:accuracy}). $r=1$ is
+the cost-optimal admissible choice.
+
+\subsection{Geometric box extent}
+Using the full geometric side (not the centre bounding box) for normalisation
+yields the exact $1/2$ child-to-parent scaling (Proposition~\ref{prop:halfscale}),
+which is what collapses M2M/L2L to four level-independent matrices
+(Proposition~\ref{prop:m2m-cache}). A centre-based extent would make the scaling
+$\ell$- and level-dependent and destroy the cache.
+
+\subsection{bbFMM versus analytic FMM versus ACA}
+\emph{bbFMM} needs only kernel \emph{evaluations}, so it accommodates the Love
+cell integral (with its logarithms) directly -- no multipole expansion of the
+integrated kernel is required, unlike an \emph{analytic FMM}, which would demand
+a tailored series for $g$ and re-derivation for any kernel change. Compared with
+a classical \emph{ACA} $\Hmat$-matrix, bbFMM gives nested, shared bases and
+hence $\Order(N)$ (not $\Order(N\log N)$) memory and matvec, and -- via
+translation invariance -- avoids storing redundant per-block factors
+(Section~\ref{sec:cache}). It is also kernel-independent at the level of
+software: the same machinery applies to any smooth $g$ supplied as a function,
+in the spirit of kernel-independent FMM~\cite{Ying2004,FongDarve2009}.
+
+\subsection{Love far kernel rather than $1/r$}
+Consistency between near and far (Section~\ref{sec:lovefar}): the far error is
+then purely interpolation, with no near/far model mismatch.
+
+\subsection{Additive backend}
+The $\Htwo$ operator is an additive backend: it implements the same
+matvec interface (\code{H2Operator::matvec}) as the dense and $\Hmat$ paths, so
+the PCG solver and all existing tests are untouched and the three backends are
+directly comparable on identical problems.
+
+\section{Validation and comparisons}
+\label{sec:valid}
+
+\subsection{Against the dense operator}
+At small $N$ the apply is checked entrywise against \code{assemble\_dense}:
+relative $L_2$ matvec error $1.3\times10^{-4}$ ($q=4$) and $3.2\times10^{-6}$
+($q=6$) at $N_s=32$ (\code{tests/test\_h2.cpp}). This certifies the operator
+implementation independently of the contact solve.
+
+\subsection{Against the classical $\Hmat$-matrix}
+The $\Htwo$ backend reproduces the $\Hmat$-matrix contact area exactly on the
+rough-surface benchmark, at a fraction of the memory: where the classical
+$\Hmat$ needs $6.2$\,GiB at $N_s=512$, the $\Htwo$ operator needs $5.26$\,MiB
+(Table~\ref{tab:mem}) -- three orders of magnitude less -- because it stores
+shared bases and cached couplings instead of independent per-block factors.
+
+\subsection{Against the FFT solver (Tamaas)}
+For a fully active rectangular grid the operator is a convolution and a
+zero-padded FFT matvec is the natural reference. Tamaas~2.8.1 implements this via
+its \code{dcfft} operator. Table~\ref{tab:tamaas} compares the $\Htwo$ backend
+($q=6$) against Tamaas on identical self-affine surfaces
+(\code{compare\_tamaas\_h2.py}).
+
+\begin{table}[h]
+\centering
+\begin{tabular}{rrrrr}
+\toprule
+$N_s$ & frac.\ (Tamaas) & frac.\ ($\Htwo$) & rel.\ $L_2$ pressure & $\Htwo$ mem [MiB] \\
+\midrule
+64  & 0.1265 & 0.1260 & 3.26\% & 1.12 \\
+128 & 0.1215 & 0.1201 & 3.17\% & 1.66 \\
+256 & 0.1112 & 0.1098 & 2.92\% & 2.61 \\
+\bottomrule
+\end{tabular}
+\caption{$\Htwo$ vs Tamaas FFT. Contact fractions agree to $\sim10^{-3}$
+(reproduced from the concise note).}
+\label{tab:tamaas}
+\end{table}
+
+The residual $\sim3\%$ pressure difference is \emph{not} an $\Htwo$ error: the
+$\Htwo$ operator reproduces the exact Love operator to $3\times10^{-6}$ at $q=6$,
+whereas Tamaas~2.8.1's \code{dcfft} influence coefficients oscillate $\pm2$--$8\%$
+from the exact Love values at $1$--$3$ cell separations (Gibbs-like), and its
+effective modulus is $2\Es{}^2$ (both verified against Hertz theory; see the
+project README and \code{doc/theory/h2\_fmm.tex}). The difference is therefore
+dominated by the FFT reference, and it is the same $\approx3.3\%$ seen for the
+$\Hmat$-matrix backend.
+
+Single-thread timing (Table~\ref{tab:tamaas-time}) shows the $\Htwo$ per-matvec
+cost is already below the FFT at every size, with the ratio improving from $0.78$
+at $N_s=64$ to $0.69$ at $N_s=512$ as the $\Order(N)$ apply overtakes the FFT's
+$\Order(N\log N)$. End-to-end the $\Htwo$ solve is $\sim1.5\times$ faster here,
+reflecting also a somewhat lower projected-CG iteration count.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{rrrrrrr}
+\toprule
+& \multicolumn{3}{c}{per-matvec [ms]} & \multicolumn{3}{c}{end-to-end solve [s]} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}
+$N_s$ & Tamaas & $\Htwo$ & ratio & Tamaas & $\Htwo$ & ratio \\
+\midrule
+64  &  0.36 &  0.28 & 0.78 &  0.029 & 0.017 & 0.58 \\
+128 &  1.63 &  1.29 & 0.79 &  0.204 & 0.128 & 0.63 \\
+256 &  6.92 &  5.59 & 0.81 &  1.230 & 0.870 & 0.71 \\
+512 & 37.30 & 25.89 & 0.69 & 10.319 & 6.822 & 0.66 \\
+\bottomrule
+\end{tabular}
+\caption{Single-thread timing, $\Htwo$ ($q=6$) vs Tamaas \code{dcfft}
+(\code{compare\_tamaas\_h2.py}), reproduced from the concise note. Per-matvec is
+the same operation $\mathbf u=S\pp$ on both sides.}
+\label{tab:tamaas-time}
+\end{table}
+
+Both $\Htwo$ and FFT are $\Order(N)$ in memory; $\Htwo$ is additionally
+\emph{local}, leaving room to skip work outside the contact set (active-set
+masking), which a global FFT cannot do without re-padding.
+
+\section{Limitations and outlook}
+\label{sec:outlook}
+
+The operator currently runs on the full grid; the contact constraint is handled
+by the PCG projection, not by skipping inactive DOFs. Natural extensions, none of
+which change the public interface
+(\code{H2Operator\{build(),matvec(),print\_statistics()\}}):
+\begin{itemize}
+\item \textbf{Active-set masking.} Restrict the near and far passes to leaves and
+interactions touching the contact patch. Because the $\Htwo$ apply is local
+(unlike the FFT), masking is natural and can reduce the per-iteration cost as the
+contact area shrinks.
+\item \textbf{Rectangular / refined grids.} The uniform quadtree currently
+requires a square, power-of-two grid with $\ell\mid N_s$
+(\code{uniform\_quadtree.cpp:16--19}). Anisotropic ($n_x\ne n_y$) and locally
+refined trees would broaden applicability at the cost of more distinct cached
+couplings.
+\item \textbf{Single-precision caches.} Storing couplings, stencils, and buffers
+in \code{float} halves memory; given the $10^{-6}$ accuracy target at $q=6$,
+single precision in the far field is comfortably adequate.
+\item \textbf{FFT backend for the fully-active case.} For a saturated rectangular
+contact, the DC-FFT convolution remains competitive and could be offered
+alongside, with the $\Htwo$ operator preferred for sparse contact and the FFT for
+near-full contact.
+\end{itemize}
+
+\section*{Summary}
+The Hcontact $\Htwo$/FMM operator applies the Boussinesq flexibility matrix in
+$\Order(N)$ time and memory, matrix-free, by combining (i) an exact short-range
+near field from the Love cell-integral lookup table; (ii) a tensor-product
+Chebyshev (bbFMM) far field with spectral accuracy in the order $q$; and (iii) a
+translation-invariant caching that collapses the transfer and coupling operators
+to four matrices, $\Order(\log N)$ couplings, and $\Order(1)$ near stencils. The
+near/far split tiles every pair of unknowns exactly once
+(Theorem~\ref{thm:coverage}), so the only approximation is a controlled,
+$N$-independent interpolation error ($3.2\times10^{-6}$ at $q=6$). The operator
+reaches $2.7\times10^8$ unknowns at second-scale build and matvec times and
+$14$\,GiB, regimes entirely out of reach for dense or classical $\Hmat$
+representations, and is faster per matvec than a state-of-the-art FFT reference.
+
+\bibliographystyle{unsrt}
+\bibliography{references}
+
+\end{document}
