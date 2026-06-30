@@ -1,0 +1,46 @@
+# Spectral-preconditioner prototype — results
+
+Prototype: `experiments/precond_pcg.py` (run in `fenicsx-env`).
+Problem: `bandlimited_surface` (self-affine, **fixed physical band** k∈[4,32],
+H=0.8, rms=0.02), normal contact at p̄=0.05, tol=1e-8, H2 matvec (q=6).
+
+## Iteration counts vs grid size
+
+| Ns | N | C++ | Python (none) | `\|q\|` | circulant | speedup | Ac/A | rel-p |
+|----|---|-----|---------------|------|-----------|---------|------|-------|
+| 64 | 4 096 | 26 | 26 | 19 | 19 | 1.37× | 0.125 | 1.4e-7 |
+| 128 | 16 384 | 43 | 43 | 25 | 24 | 1.79× | 0.098 | 2.4e-7 |
+| 256 | 65 536 | 56 | 56 | 33 | 33 | 1.70× | 0.091 | 3.3e-7 |
+| 512 | 262 144 | 83 | 83 | 43 | 43 | 1.93× | 0.095 | 4.5e-7 |
+| 1024 | 1 048 576 | 180 | 180 | 62 | 62 | **2.90×** | 0.105 | 4.9e-7 |
+
+## Findings
+
+1. **The Python projected CG reproduces the C++ solver exactly** (`cpp` == `none`
+   column) — the prototype is a faithful baseline.
+2. **The example's steep growth (90→906) was mostly the surface roughening with
+   Ns.** With a fixed physical band the baseline grows ~√Ns (26→180 over a 16×
+   range in Ns), as predicted by κ(S)∼Ns.
+3. **The spectral preconditioner gives a growing speedup** — 1.4× at Ns=64 up to
+   2.9× at Ns=1024 — because the preconditioned count grows ~half as fast as the
+   baseline. The advantage compounds at scale (the large-grid regime that
+   motivated this).
+4. **Circulant (1/Ŝ_c) ≈ |q|**: the simpler, guaranteed-positive `|q|` symbol is
+   the choice; the circulant form adds nothing here.
+5. **Solutions match** the unpreconditioned result to ~5e-7 (rel-p).
+
+## Limitation / why not grid-independent
+
+The preconditioner conditions the *full* operator, but the contact constraint
+restricts it; masking the residual to the contact set breaks the FFT
+diagonalization near the contact boundary and for fragmented contact. Pure
+spectral preconditioning therefore reduces — but does not eliminate — the
+growth. Reaching near grid-independence needs the complementary **nested-grid
+(cascadic/FMG) continuation** (deferred in the spec): solve coarse→fine,
+warm-starting each level with the prolonged coarse pressure + active set.
+
+## Next steps
+
+- Port the `|q|` preconditioner into C++ `solve_contact` (header-only FFT +
+  optional preconditioner argument) to bank the 2–3× in production.
+- Add nested-grid continuation and re-measure; expect the growth to flatten.
