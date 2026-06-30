@@ -359,7 +359,15 @@ set. Injection is load-preserving and keeps a sharp contact boundary; bilinear
 prolongation smears pressure across the contact edge and gives a worse active-set
 seed. Coarse levels use a looser (cascadic) tolerance. The overlap correction can
 still reactivate nodes on the fine level, so the warm start is a seed, not a
-constraint.
+constraint. The whole coarse$\to$fine continuation is a single C++ entry point
+with no Python orchestration: \texttt{hmc::solve\_contact\_nested(...)}
+(\texttt{include/nested\_solve.hpp}), exposed to Python as
+\texttt{hc.solve\_nested(grid\_size, gap, p\_nominal, coarsest=64, q=6, ...)};
+it builds the grid hierarchy and per-level $\mathcal{H}^2$ operators internally,
+restricts the gap by $2\times2$ averaging, and warm-starts each level by
+injecting the prolonged coarse pressure (requiring
+$\texttt{grid\_size}=\texttt{coarsest}\cdot2^k$), returning a standard
+\texttt{ContactResult}.
 
 \paragraph{Results.}
 On a fixed-band rough surface ($p_{\text{nominal}}=0.05$, tol $10^{-8}$, $q=6$),

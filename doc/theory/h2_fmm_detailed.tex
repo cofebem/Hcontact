@@ -1523,6 +1523,19 @@ is applied only on the finest grid. Finally, the fine-level overlap correction
 seed left open, so the warm start is a seed, not a hard constraint: convergence to
 the correct fine fixed point is unaffected.
 
+\begin{remark}[Single-entry implementation]
+\label{rem:nested-api}
+The entire coarse$\to$fine continuation is implemented as one C++ entry point,
+with no Python orchestration: \code{hmc::solve\_contact\_nested(...)}
+(\code{include/nested\_solve.hpp}), exposed to Python as
+\code{hc.solve\_nested(grid\_size, gap, p\_nominal, coarsest=64, q=6, ...)}.
+It builds the grid hierarchy and the per-level $\Htwo$ operators internally,
+restricts the gap by $2\times2$ averaging, and warm-starts each level by
+injecting the prolonged coarse pressure. It requires
+$\texttt{grid\_size}=\texttt{coarsest}\cdot2^{k}$ and returns a standard
+\code{ContactResult}.
+\end{remark}
+
 \subsection{Results}
 \label{sec:accel-results}
 
