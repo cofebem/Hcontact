@@ -215,9 +215,10 @@ PyResult py_solve_nested(
     const py::array_t<double, py::array::c_style | py::array::forcecast>& gap,
     double p_nominal, double domain_size, double E_star, int coarsest, int q,
     int leaf_side, bool precond, double tol, double coarse_tol, int max_iter,
-    bool use_pr) {
+    bool use_pr, bool single_precision) {
     Eigen::VectorXd g0 = to_vector(gap, grid_size * grid_size);
-    hmc::NestedParams np{coarsest, q, leaf_side, precond, coarse_tol};
+    hmc::NestedParams np{coarsest, q, leaf_side, precond, coarse_tol,
+                         single_precision};
     PyResult out;
     out.Ns = grid_size;
     {
@@ -298,6 +299,7 @@ PYBIND11_MODULE(hmatrix_contact, m) {
           py::arg("leaf_side") = 8, py::arg("precond") = true,
           py::arg("tol") = 1e-8, py::arg("coarse_tol") = 1e-4,
           py::arg("max_iter") = 20000, py::arg("use_pr") = true,
+          py::arg("single_precision") = false,
           "Single-entry nested-grid (cascadic/FMG) contact solve: builds the "
           "coarse->fine hierarchy and H2 operators internally and warm-starts "
           "each level with the prolonged coarse pressure. grid_size must equal "

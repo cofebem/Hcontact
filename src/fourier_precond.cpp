@@ -82,4 +82,35 @@ FourierPreconditioner::apply(const Eigen::VectorXd& g,
     return z;
 }
 
+Eigen::VectorXf
+FourierPreconditioner::apply_single(const Eigen::VectorXf& g,
+                                    const std::vector<std::uint8_t>& contact) const {
+    // The float residual is scattered into a double FFT (the transform is the
+    // memory-cheap part relative to the O(N) solver vectors); result cast back.
+    const int N = Ns_ * Ns_;
+    Eigen::MatrixXd R = Eigen::MatrixXd::Zero(Ns_, Ns_);
+    for (int i = 0; i < N; ++i)
+        if (contact[i]) R(i / Ns_, i % Ns_) = static_cast<double>(g(i));
+
+    Eigen::FFT<double> fft;
+    Eigen::MatrixXcd C(Ns_, Ns_);
+    fft2_fwd(fft, R, C);
+    C.array() *= w_.array();
+    Eigen::MatrixXd Z(Ns_, Ns_);
+    fft2_inv(fft, C, Z);
+
+    Eigen::VectorXf z = Eigen::VectorXf::Zero(N);
+    double zsum = 0.0;
+    int nc = 0;
+    for (int i = 0; i < N; ++i)
+        if (contact[i]) { z(i) = static_cast<float>(Z(i / Ns_, i % Ns_));
+                          zsum += z(i); ++nc; }
+    if (nc) {
+        const float zmean = static_cast<float>(zsum / nc);
+        for (int i = 0; i < N; ++i)
+            if (contact[i]) z(i) -= zmean;
+    }
+    return z;
+}
+
 } // namespace hmc

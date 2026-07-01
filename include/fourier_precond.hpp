@@ -21,6 +21,10 @@ public:
     Eigen::VectorXd apply(const Eigen::VectorXd& g,
                           const std::vector<std::uint8_t>& contact) const;
 
+    // Single-precision variant (FFT done in float; symbol applied as float).
+    Eigen::VectorXf apply_single(const Eigen::VectorXf& g,
+                                 const std::vector<std::uint8_t>& contact) const;
+
 private:
     int Ns_;
     Eigen::MatrixXd w_; // Ns×Ns wavenumber symbol |k|, w_(0,0)=0

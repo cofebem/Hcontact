@@ -4,6 +4,7 @@
 #include "fourier_precond.hpp"
 #include "h2_operator.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 #include <vector>
 
@@ -77,9 +78,32 @@ ContactResult solve_contact_nested(int Ns, double L, double E_star,
             };
 
         const bool finest = (li + 1 == levels.size());
-        const double lvl_tol = finest ? tol : np.coarse_tol;
-        res = solve_contact(mv, gap[li], p_bar, lvl_tol, max_iter, use_pr, pc,
-                            have_init ? &p_init : nullptr);
+        double lvl_tol = finest ? tol : np.coarse_tol;
+        // float arithmetic cannot drive the complementarity error below ~1e-6,
+        // so clamp the requested tolerance to a reachable floor in that mode.
+        if (np.single_precision) lvl_tol = std::max(lvl_tol, 2e-6);
+
+        if (np.single_precision) {
+            op.build_single_caches();
+            auto mvf = [&op](const Eigen::VectorXf& v) {
+                return op.matvec_single(v);
+            };
+            PrecondT<float> pcf;
+            if (np.precond)
+                pcf = [&fp](const Eigen::VectorXf& g,
+                            const std::vector<std::uint8_t>& contact) {
+                    return fp.apply_single(g, contact);
+                };
+            Eigen::VectorXf g0f = gap[li].cast<float>();
+            Eigen::VectorXf p0f;
+            if (have_init) p0f = p_init.cast<float>();
+            res = solve_contact_impl<float>(
+                mvf, g0f, static_cast<float>(p_bar), static_cast<float>(lvl_tol),
+                max_iter, use_pr, pcf, have_init ? &p0f : nullptr);
+        } else {
+            res = solve_contact(mv, gap[li], p_bar, lvl_tol, max_iter, use_pr, pc,
+                                have_init ? &p_init : nullptr);
+        }
 
         if (!finest) {
             p_init = prolong_field(res.pressure, n);

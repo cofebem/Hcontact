@@ -1,42 +1,43 @@
 #include "contact_solver.hpp"
 
 #include <cmath>
-#include <limits>
 #include <stdexcept>
 
 namespace hmc {
 
-ContactResult solve_contact(const MatVec& S, const Eigen::VectorXd& g0,
-                            double p_bar, double tol, int max_iter, bool use_pr,
-                            const Precond& precond, const Eigen::VectorXd* p_init) {
+template <class Real>
+ContactResult solve_contact_impl(const MatVecT<Real>& S, const VecT<Real>& g0,
+                                 Real p_bar, Real tol, int max_iter, bool use_pr,
+                                 const PrecondT<Real>& precond,
+                                 const VecT<Real>* p_init) {
+    using Vec = VecT<Real>;
     const int N = static_cast<int>(g0.size());
-    if (N == 0 || p_bar <= 0.0)
+    if (N == 0 || p_bar <= Real(0))
         throw std::invalid_argument("solve_contact: empty gap or p_bar <= 0");
 
-    const double P_total = p_bar * N;
-    double g_scale = g0.maxCoeff() - g0.minCoeff();
-    if (g_scale <= 0.0) g_scale = 1.0;
+    const Real P_total = p_bar * N;
+    Real g_scale = g0.maxCoeff() - g0.minCoeff();
+    if (g_scale <= Real(0)) g_scale = Real(1);
 
-    Eigen::VectorXd p;
+    Vec p;
     if (p_init) {
         if (static_cast<int>(p_init->size()) != N)
             throw std::invalid_argument("solve_contact: p_init size mismatch");
-        p = p_init->cwiseMax(0.0);
-        const double s = p.sum();
-        p = (s > 0.0) ? (p * (P_total / s)).eval()
-                      : Eigen::VectorXd::Constant(N, p_bar);
+        p = p_init->cwiseMax(Real(0));
+        const Real s = p.sum();
+        p = (s > Real(0)) ? (p * (P_total / s)).eval() : Vec::Constant(N, p_bar);
     } else {
-        p = Eigen::VectorXd::Constant(N, p_bar);
+        p = Vec::Constant(N, p_bar);
     }
-    Eigen::VectorXd t = Eigen::VectorXd::Zero(N);
-    Eigen::VectorXd u(N), g(N), g_prev(N), z(N);
+    Vec t = Vec::Zero(N);
+    Vec u(N), g(N), g_prev(N), z(N);
     std::vector<std::uint8_t> contact(N, 0);
     g_prev.setZero();
 
     ContactResult res;
-    double G_old = 1.0;
-    double delta = 0.0; // conjugation switch: 0 after the active set changed
-    double alpha = 0.0;
+    Real G_old = 1.0;
+    Real delta = 0.0; // conjugation switch: 0 after the active set changed
+    Real alpha = 0.0;
 
     int it = 0;
     for (it = 0; it < max_iter; ++it) {
@@ -44,79 +45,79 @@ ContactResult solve_contact(const MatVec& S, const Eigen::VectorXd& g0,
         g = u + g0;
 
         // rigid-body shift: zero mean gap over the current contact set
-        double gsum = 0.0;
+        Real gsum = 0.0;
         int nc = 0;
         for (int i = 0; i < N; ++i)
-            if (p(i) > 0.0) { gsum += g(i); ++nc; }
-        alpha = nc ? gsum / nc : 0.0;
+            if (p(i) > Real(0)) { gsum += g(i); ++nc; }
+        alpha = nc ? gsum / nc : Real(0);
         g.array() -= alpha;
 
         // complementarity error: sum p |g| (g = 0 where p > 0 at the solution)
-        double e = 0.0;
+        Real e = 0.0;
         for (int i = 0; i < N; ++i) e += p(i) * std::abs(g(i));
-        res.error = e / (P_total * g_scale);
-        if (res.error < tol) {
+        res.error = static_cast<double>(e / (P_total * g_scale));
+        if (res.error < static_cast<double>(tol)) {
             res.converged = true;
             break;
         }
 
         // preconditioned residual z (z = g on contact when no preconditioner)
-        for (int i = 0; i < N; ++i) contact[i] = (p(i) > 0.0) ? 1 : 0;
+        for (int i = 0; i < N; ++i) contact[i] = (p(i) > Real(0)) ? 1 : 0;
         if (precond) {
             z = precond(g, contact);
         } else {
-            for (int i = 0; i < N; ++i) z(i) = contact[i] ? g(i) : 0.0;
+            for (int i = 0; i < N; ++i) z(i) = contact[i] ? g(i) : Real(0);
         }
 
         // conjugate direction restricted to the contact set (M-inner product)
-        double G = 0.0, G_pr = 0.0;
+        Real G = 0.0, G_pr = 0.0;
         for (int i = 0; i < N; ++i)
             if (contact[i]) {
                 G    += z(i) * g(i);
                 G_pr += z(i) * (g(i) - g_prev(i));
             }
-        double beta_val = use_pr ? std::max(0.0, G_pr / G_old) : G / G_old;
-        const double beta = delta * beta_val;
+        Real beta_val = use_pr ? std::max(Real(0), G_pr / G_old) : G / G_old;
+        const Real beta = delta * beta_val;
         for (int i = 0; i < N; ++i)
-            t(i) = contact[i] ? z(i) + beta * t(i) : 0.0;
+            t(i) = contact[i] ? z(i) + beta * t(i) : Real(0);
         g_prev = g;
         G_old = G;
 
         // line search tau = <g, t> / <S t, t> on the contact set
-        Eigen::VectorXd r = S(t);
-        double rsum = 0.0;
+        Vec r = S(t);
+        Real rsum = 0.0;
         for (int i = 0; i < N; ++i)
-            if (p(i) > 0.0) rsum += r(i);
-        const double rmean = nc ? rsum / nc : 0.0;
-        double num = 0.0, den = 0.0;
+            if (p(i) > Real(0)) rsum += r(i);
+        const Real rmean = nc ? rsum / nc : Real(0);
+        Real num = 0.0, den = 0.0;
         for (int i = 0; i < N; ++i)
-            if (p(i) > 0.0) {
+            if (p(i) > Real(0)) {
                 num += g(i) * t(i);
                 den += (r(i) - rmean) * t(i);
             }
-        if (den <= 0.0) { // direction lost positive curvature: steepest descent
+        if (den <= Real(0)) { // direction lost positive curvature: steepest descent
             delta = 0.0;
             continue;
         }
-        const double tau = num / den;
+        const Real tau = num / den;
 
         // update, project onto p >= 0
         for (int i = 0; i < N; ++i)
-            if (p(i) > 0.0) p(i) -= tau * t(i);
-        p = p.cwiseMax(0.0);
+            if (p(i) > Real(0)) p(i) -= tau * t(i);
+        p = p.cwiseMax(Real(0));
 
         // overlap correction: points released to p = 0 but penetrating
         bool overlap = false;
         for (int i = 0; i < N; ++i)
-            if (p(i) == 0.0 && g(i) < 0.0) {
+            if (p(i) == Real(0) && g(i) < Real(0)) {
                 p(i) -= tau * g(i);
                 overlap = true;
             }
-        delta = overlap ? 0.0 : 1.0;
+        delta = overlap ? Real(0) : Real(1);
 
         // enforce the load balance
-        const double total = p.sum();
-        if (total > 0.0)
+        const Real total = p.sum();
+        if (total > Real(0))
             p *= P_total / total;
         else
             p.setConstant(p_bar);
@@ -124,21 +125,36 @@ ContactResult solve_contact(const MatVec& S, const Eigen::VectorXd& g0,
 
     u = S(p);
     g = u + g0;
-    double gsum = 0.0;
+    Real gsum = 0.0;
     int nc = 0;
     for (int i = 0; i < N; ++i)
-        if (p(i) > 0.0) { gsum += g(i); ++nc; }
-    alpha = nc ? gsum / nc : 0.0;
+        if (p(i) > Real(0)) { gsum += g(i); ++nc; }
+    alpha = nc ? gsum / nc : Real(0);
 
-    res.pressure = p;
-    res.displacement = u;
-    res.gap = g.array() - alpha;
-    res.approach = alpha;
-    res.objective = 0.5 * p.dot(u) + p.dot(g0);
+    res.pressure = p.template cast<double>();
+    res.displacement = u.template cast<double>();
+    res.gap = (g.array() - alpha).template cast<double>();
+    res.approach = static_cast<double>(alpha);
+    res.objective = static_cast<double>(Real(0.5) * p.dot(u) + p.dot(g0));
     res.iterations = it;
     res.contact_fraction = double(nc) / N;
-    res.mean_pressure = p.mean();
+    res.mean_pressure = static_cast<double>(p.mean());
     return res;
+}
+
+// explicit instantiations
+template ContactResult solve_contact_impl<double>(
+    const MatVecT<double>&, const VecT<double>&, double, double, int, bool,
+    const PrecondT<double>&, const VecT<double>*);
+template ContactResult solve_contact_impl<float>(
+    const MatVecT<float>&, const VecT<float>&, float, float, int, bool,
+    const PrecondT<float>&, const VecT<float>*);
+
+ContactResult solve_contact(const MatVec& S, const Eigen::VectorXd& g0,
+                            double p_bar, double tol, int max_iter, bool use_pr,
+                            const Precond& precond, const Eigen::VectorXd* p_init) {
+    return solve_contact_impl<double>(S, g0, p_bar, tol, max_iter, use_pr,
+                                      precond, p_init);
 }
 
 } // namespace hmc

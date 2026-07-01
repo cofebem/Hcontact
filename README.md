@@ -82,6 +82,9 @@ solver.hmatrix_info() # block counts, ranks, compression ratio
   `hc.solve_nested(grid_size, gap, p_nominal, ...)` vs the unpreconditioned
   solver. At Ns=1024: 4× fewer iterations (180→45) and ~1.6× faster wall time,
   identical solution (ΔArea 0, rel-L2 ~5e-7).
+- `hc.solve_nested(..., single_precision=True)` runs the solve in `float`,
+  ~halving peak RAM for the largest grids (memory-bound nodes); solution matches
+  the double solve to rel-L2 ~2e-5. See `example_rough_contact.py` (Ns=16384).
 - `OMP_NUM_THREADS=1 python compare_tamaas_h2.py --max-n 512` — H2 vs Tamaas
   dcfft FFT, accuracy and timing. Single-thread per-matvec is 0.78→0.69× the
   FFT as Ns grows (O(N) vs O(N log N)); end-to-end solve ~1.5× faster;

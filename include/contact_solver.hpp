@@ -20,13 +20,18 @@ struct ContactResult {
     double mean_pressure = 0.0;
 };
 
-using MatVec = std::function<Eigen::VectorXd(const Eigen::VectorXd&)>;
+template <class Real> using VecT = Eigen::Matrix<Real, Eigen::Dynamic, 1>;
+template <class Real> using MatVecT = std::function<VecT<Real>(const VecT<Real>&)>;
+template <class Real>
+using PrecondT = std::function<VecT<Real>(const VecT<Real>& g,
+                                          const std::vector<std::uint8_t>& contact)>;
+
+using MatVec = MatVecT<double>;
 
 // Optional preconditioner: z = M^-1 g, given the gradient g and the contact
 // mask (contact[i] != 0). Returns z restricted to the contact set. An empty
 // Precond means unpreconditioned (z = g on the contact set).
-using Precond = std::function<Eigen::VectorXd(const Eigen::VectorXd& g,
-                                              const std::vector<std::uint8_t>& contact)>;
+using Precond = PrecondT<double>;
 
 // Polonsky & Keer (Wear 231, 1999) projected CG for the constrained problem
 //   min 1/2 p^T S p + p^T g0   s.t.  p >= 0,  mean(p) = p_bar.
@@ -35,6 +40,14 @@ using Precond = std::function<Eigen::VectorXd(const Eigen::VectorXd& g,
 // precond (optional): spectral preconditioner applied to the gradient.
 // p_init (optional): warm-start pressure (renormalised to the load); nullptr
 //   starts from the uniform field p_bar.
+// Scalar-templated implementation (Real = double or float). The result is
+// always returned in double regardless of the working precision.
+template <class Real>
+ContactResult solve_contact_impl(const MatVecT<Real>& S, const VecT<Real>& g0,
+                                 Real p_bar, Real tol, int max_iter, bool use_pr,
+                                 const PrecondT<Real>& precond,
+                                 const VecT<Real>* p_init);
+
 ContactResult solve_contact(const MatVec& S, const Eigen::VectorXd& g0,
                             double p_bar, double tol = 1e-8,
                             int max_iter = 5000, bool use_pr = true,

@@ -155,99 +155,25 @@ void H2Operator::build() {
 }
 
 Eigen::VectorXd H2Operator::matvec(const Eigen::VectorXd& x) const {
-    const auto& boxes = tree_.boxes();
-    const int nbox = static_cast<int>(boxes.size());
-    std::vector<Eigen::VectorXd> M(nbox), L(nbox);
-    for (int b = 0; b < nbox; ++b) {
-        M[b] = Eigen::VectorXd::Zero(q2_);
-        L[b] = Eigen::VectorXd::Zero(q2_);
-    }
-    Eigen::VectorXd y = Eigen::VectorXd::Zero(x.size());
+    return matvec_impl<double>(x, Wleaf_, R_, couplings_, near_stencils_);
+}
 
-    // ── P2M: leaves ──
-#pragma omp parallel for schedule(dynamic, 16)
-    for (int li = 0; li < static_cast<int>(leaves_.size()); ++li) {
-        const int t = leaves_[li];
-        const int ix0 = boxes[t].ix0, iy0 = boxes[t].iy0;
-        Eigen::MatrixXd Xs(ls_, ls_); // (ly, lx)
-        for (int ly = 0; ly < ls_; ++ly)
-            for (int lx = 0; lx < ls_; ++lx)
-                Xs(ly, lx) = x((iy0 + ly) * Ns_ + (ix0 + lx));
-        const Eigen::MatrixXd Mmat = Wleaf_.transpose() * Xs * Wleaf_; // (q x q): (ay, ax)
-        Eigen::VectorXd& Mt = M[t];
-        for (int ay = 0; ay < q_; ++ay)
-            for (int ax = 0; ax < q_; ++ax)
-                Mt(ax + q_ * ay) = Mmat(ay, ax);
-    }
+void H2Operator::build_single_caches() const {
+    if (have_single_) return;
+    Wleaf_f_ = Wleaf_.cast<float>();
+    for (int c = 0; c < 4; ++c) R_f_[c] = R_[c].cast<float>();
+    couplings_f_.resize(couplings_.size());
+    for (std::size_t i = 0; i < couplings_.size(); ++i)
+        couplings_f_[i] = couplings_[i].cast<float>();
+    near_stencils_f_.resize(near_stencils_.size());
+    for (std::size_t i = 0; i < near_stencils_.size(); ++i)
+        near_stencils_f_[i] = near_stencils_[i].cast<float>();
+    have_single_ = true;
+}
 
-    // ── M2M: finest non-leaf level up to root ──
-    for (int l = tree_.leaf_level() - 1; l >= 0; --l) {
-        const int b0 = tree_.level_begin(l);
-        const int nb = (1 << l) * (1 << l);
-#pragma omp parallel for schedule(dynamic, 16)
-        for (int k = 0; k < nb; ++k) {
-            const int b = b0 + k;
-            Eigen::VectorXd acc = Eigen::VectorXd::Zero(q2_);
-            for (int c = 0; c < 4; ++c) {
-                const int cc = boxes[b].child[c];
-                if (cc >= 0) acc.noalias() += R_[c] * M[cc];
-            }
-            M[b] = acc;
-        }
-    }
-
-    // ── M2L: far interactions, grouped by target ──
-#pragma omp parallel for schedule(dynamic, 16)
-    for (int t = 0; t < nbox; ++t) {
-        Eigen::VectorXd acc = Eigen::VectorXd::Zero(q2_);
-        for (const FarInter& fi : far_by_target_[t])
-            acc.noalias() += couplings_[fi.coupling_id] * M[fi.source_box];
-        L[t] = acc;
-    }
-
-    // ── L2L: root down to leaves ──
-    for (int l = 1; l <= tree_.leaf_level(); ++l) {
-        const int b0 = tree_.level_begin(l);
-        const int nb = (1 << l) * (1 << l);
-#pragma omp parallel for schedule(dynamic, 16)
-        for (int k = 0; k < nb; ++k) {
-            const int b = b0 + k;
-            const int c = (boxes[b].bx & 1) + 2 * (boxes[b].by & 1);
-            L[b].noalias() += R_[c].transpose() * L[boxes[b].parent];
-        }
-    }
-
-    // ── L2P + near field: leaves (disjoint outputs per leaf) ──
-#pragma omp parallel for schedule(dynamic, 16)
-    for (int li = 0; li < static_cast<int>(leaves_.size()); ++li) {
-        const int t = leaves_[li];
-        const int ix0 = boxes[t].ix0, iy0 = boxes[t].iy0;
-
-        // L2P
-        Eigen::MatrixXd Lmat(q_, q_); // (ay, ax)
-        for (int ay = 0; ay < q_; ++ay)
-            for (int ax = 0; ax < q_; ++ax)
-                Lmat(ay, ax) = L[t](ax + q_ * ay);
-        Eigen::MatrixXd Yt = Wleaf_ * Lmat * Wleaf_.transpose(); // (ls x ls): (ly, lx)
-
-        // near field: y_block += A_near * x_block(source leaf)
-        Eigen::VectorXd yloc = Eigen::VectorXd::Zero(ls2_);
-        for (const NearInter& ni : near_by_leaf_[li]) {
-            const int s = ni.source_box;
-            const int six0 = boxes[s].ix0, siy0 = boxes[s].iy0;
-            Eigen::VectorXd xs(ls2_);
-            for (int ly = 0; ly < ls_; ++ly)
-                for (int lx = 0; lx < ls_; ++lx)
-                    xs(lx + ls_ * ly) = x((siy0 + ly) * Ns_ + (six0 + lx));
-            yloc.noalias() += near_stencils_[ni.stencil_id] * xs;
-        }
-
-        for (int ly = 0; ly < ls_; ++ly)
-            for (int lx = 0; lx < ls_; ++lx)
-                y((iy0 + ly) * Ns_ + (ix0 + lx)) = Yt(ly, lx) + yloc(lx + ls_ * ly);
-    }
-
-    return y;
+Eigen::VectorXf H2Operator::matvec_single(const Eigen::VectorXf& x) const {
+    build_single_caches();
+    return matvec_impl<float>(x, Wleaf_f_, R_f_, couplings_f_, near_stencils_f_);
 }
 
 void H2Operator::print_statistics() const {

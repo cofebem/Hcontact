@@ -12,6 +12,7 @@ struct NestedParams {
     int leaf_side = 8;        // H2 leaf side on every level
     bool precond = true;      // |q| spectral preconditioner per level
     double coarse_tol = 1e-4; // cascadic: looser tolerance on coarse levels
+    bool single_precision = false; // run each level's solve in float (~half RAM)
 };
 
 // Single-entry nested-grid (cascadic / full-multigrid) contact solve. Builds
