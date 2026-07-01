@@ -239,10 +239,15 @@ PYBIND11_MODULE(hmatrix_contact, m) {
         .def_property_readonly(
             "pressure", [](const PyResult& s) { return as_grid(s.r.pressure, s.Ns); })
         .def_property_readonly(
-            "displacement",
-            [](const PyResult& s) { return as_grid(s.r.displacement, s.Ns); })
+            "displacement", [](const PyResult& s) -> py::object {
+                if (s.r.displacement.size() == 0) return py::none(); // light_result
+                return as_grid(s.r.displacement, s.Ns);
+            })
         .def_property_readonly(
-            "gap", [](const PyResult& s) { return as_grid(s.r.gap, s.Ns); })
+            "gap", [](const PyResult& s) -> py::object {
+                if (s.r.gap.size() == 0) return py::none(); // light_result
+                return as_grid(s.r.gap, s.Ns);
+            })
         .def_property_readonly("objective",
                                [](const PyResult& s) { return s.r.objective; })
         .def_property_readonly(

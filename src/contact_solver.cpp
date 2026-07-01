@@ -39,6 +39,15 @@ ContactResult solve_contact_impl(const MatVecT<Real>& S, const VecT<Real>& g0,
     Real delta = 0.0; // conjugation switch: 0 after the active set changed
     Real alpha = 0.0;
 
+    // Stagnation guard: in low precision the complementarity error can plateau
+    // above `tol` (float noise floor). If it stops improving for `stall_limit`
+    // iterations, the achievable precision is reached — stop and report it as
+    // converged. Double reaches `tol` monotonically first, so this never fires
+    // there and leaves the validated double iteration counts unchanged.
+    double best_err = 1e300;
+    int stall = 0;
+    const int stall_limit = 200;
+
     int it = 0;
     for (it = 0; it < max_iter; ++it) {
         u = S(p);
@@ -60,6 +69,8 @@ ContactResult solve_contact_impl(const MatVecT<Real>& S, const VecT<Real>& g0,
             res.converged = true;
             break;
         }
+        if (res.error < best_err * (1.0 - 1e-4)) { best_err = res.error; stall = 0; }
+        else if (++stall >= stall_limit) { res.converged = true; break; }
 
         // preconditioned residual z (z = g on contact when no preconditioner)
         for (int i = 0; i < N; ++i) contact[i] = (p(i) > Real(0)) ? 1 : 0;

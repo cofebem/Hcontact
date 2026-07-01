@@ -83,11 +83,15 @@ solver.hmatrix_info() # block counts, ranks, compression ratio
   solver. At Ns=1024: 4× fewer iterations (180→45) and ~1.6× faster wall time,
   identical solution (ΔArea 0, rel-L2 ~5e-7).
 - `hc.solve_nested(..., single_precision=True, light_result=True)` runs the
-  solve in `float` and drops the displacement/gap outputs, roughly halving the
-  solver's peak RAM (Ns=4096: 1.37→0.74 GiB); solution matches the double solve
-  to rel-L2 ~2e-5. Keep the preconditioner on (single precision needs it). At
-  the largest grids the Python surface generation often dominates memory — build
-  it in float32 via broadcasting. See `example_rough_contact.py` (Ns=16384).
+  solve in `float` and drops the displacement/gap outputs, cutting the solver's
+  peak RAM by ~⅓ with the preconditioner on (Ns=4096: 2.31→1.57 GiB →
+  Ns=16384 ≈ 25 GiB, fits 32 GiB); solution matches the double solve to rel-L2
+  ~2e-5. Keep the preconditioner on (single precision needs it to converge; the
+  PCG has a stagnation guard so it stops at the float floor rather than spinning
+  to max_iter). At the largest grids the Python surface generation often
+  dominates memory — build it in float32 via broadcasting. See
+  `example_rough_contact.py` (Ns=16384). When `light_result=True`, the result's
+  `displacement`/`gap` are `None`.
 - `OMP_NUM_THREADS=1 python compare_tamaas_h2.py --max-n 512` — H2 vs Tamaas
   dcfft FFT, accuracy and timing. Single-thread per-matvec is 0.78→0.69× the
   FFT as Ns grows (O(N) vs O(N log N)); end-to-end solve ~1.5× faster;

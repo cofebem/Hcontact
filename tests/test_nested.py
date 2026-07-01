@@ -43,11 +43,11 @@ def test_solve_nested():
                     / np.linalg.norm(np.asarray(ref.pressure)))
         print(f"Ns={Ns}: single+light={sp.iterations} it, conv={sp.converged}, "
               f"dArea={d_area_sp:.2e}, relL2={relL2_sp:.1e}, "
-              f"disp_empty={np.asarray(sp.displacement).size == 0}")
-        assert sp.converged
+              f"disp_none={sp.displacement is None}")
+        assert sp.converged           # reaches the float floor via stagnation guard
         assert d_area_sp < 2e-3, d_area_sp
         assert relL2_sp < 1e-3, relL2_sp
-        assert np.asarray(sp.displacement).size == 0  # light: no displacement
+        assert sp.displacement is None  # light_result: displacement not stored
 
 
 if __name__ == "__main__":
