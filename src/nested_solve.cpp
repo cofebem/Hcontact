@@ -8,6 +8,10 @@
 #include <stdexcept>
 #include <vector>
 
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
+
 namespace hmc {
 
 // 2x2 block-average restriction: fine (Ns x Ns) -> coarse (Ns/2 x Ns/2).
@@ -45,6 +49,16 @@ ContactResult solve_contact_nested(int Ns, double L, double E_star,
                                    const NestedParams& np) {
     if (static_cast<int>(g0.size()) != Ns * Ns)
         throw std::invalid_argument("solve_contact_nested: g0 size != Ns*Ns");
+
+#ifdef __GLIBC__
+    // The matvec and preconditioner allocate large temporaries every iteration
+    // (M/L buffers, the y vector, the FFT arrays). Force allocations above
+    // 128 KB to use mmap so free() returns them to the OS immediately (munmap),
+    // instead of accumulating in glibc's arena — otherwise peak RSS climbs
+    // steadily over the iterations and OOMs at large Ns.
+    mallopt(M_MMAP_THRESHOLD, 128 * 1024);
+    mallopt(M_TRIM_THRESHOLD, 128 * 1024);
+#endif
 
     std::vector<int> levels;
     for (int n = np.coarsest; n <= Ns; n *= 2) levels.push_back(n);
