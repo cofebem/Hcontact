@@ -35,6 +35,20 @@ def test_solve_nested():
         assert relL2 < 1e-4, relL2
         assert nest.iterations <= ref.iterations
 
+        # single precision + light result: converges and matches to float accuracy
+        sp = hc.solve_nested(grid_size=Ns, gap=g0, p_nominal=P_BAR, coarsest=64,
+                             q=6, single_precision=True, light_result=True)
+        d_area_sp = abs(sp.contact_area - ref.contact_area)
+        relL2_sp = (np.linalg.norm(np.asarray(sp.pressure) - np.asarray(ref.pressure))
+                    / np.linalg.norm(np.asarray(ref.pressure)))
+        print(f"Ns={Ns}: single+light={sp.iterations} it, conv={sp.converged}, "
+              f"dArea={d_area_sp:.2e}, relL2={relL2_sp:.1e}, "
+              f"disp_empty={np.asarray(sp.displacement).size == 0}")
+        assert sp.converged
+        assert d_area_sp < 2e-3, d_area_sp
+        assert relL2_sp < 1e-3, relL2_sp
+        assert np.asarray(sp.displacement).size == 0  # light: no displacement
+
 
 if __name__ == "__main__":
     test_solve_nested()

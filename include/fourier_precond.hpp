@@ -27,7 +27,7 @@ public:
 
 private:
     int Ns_;
-    Eigen::MatrixXd w_; // Ns×Ns wavenumber symbol |k|, w_(0,0)=0
+    Eigen::MatrixXf w_; // Ns×Ns wavenumber symbol |k| (float), w_(0,0)=0
 };
 
 } // namespace hmc

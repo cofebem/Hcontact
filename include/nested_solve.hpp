@@ -13,6 +13,7 @@ struct NestedParams {
     bool precond = true;      // |q| spectral preconditioner per level
     double coarse_tol = 1e-4; // cascadic: looser tolerance on coarse levels
     bool single_precision = false; // run each level's solve in float (~half RAM)
+    bool light_result = false;     // skip displacement/gap in the result (~2 N arrays)
 };
 
 // Single-entry nested-grid (cascadic / full-multigrid) contact solve. Builds

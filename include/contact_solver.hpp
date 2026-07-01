@@ -42,16 +42,19 @@ using Precond = PrecondT<double>;
 //   starts from the uniform field p_bar.
 // Scalar-templated implementation (Real = double or float). The result is
 // always returned in double regardless of the working precision.
+// light=true skips storing the displacement and gap fields (saves two N-sized
+// double arrays in the result); pressure and all scalars are still filled.
 template <class Real>
 ContactResult solve_contact_impl(const MatVecT<Real>& S, const VecT<Real>& g0,
                                  Real p_bar, Real tol, int max_iter, bool use_pr,
                                  const PrecondT<Real>& precond,
-                                 const VecT<Real>* p_init);
+                                 const VecT<Real>* p_init, bool light = false);
 
 ContactResult solve_contact(const MatVec& S, const Eigen::VectorXd& g0,
                             double p_bar, double tol = 1e-8,
                             int max_iter = 5000, bool use_pr = true,
                             const Precond& precond = {},
-                            const Eigen::VectorXd* p_init = nullptr);
+                            const Eigen::VectorXd* p_init = nullptr,
+                            bool light = false);
 
 } // namespace hmc

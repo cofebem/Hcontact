@@ -82,6 +82,9 @@ ContactResult solve_contact_nested(int Ns, double L, double E_star,
         // float arithmetic cannot drive the complementarity error below ~1e-6,
         // so clamp the requested tolerance to a reachable floor in that mode.
         if (np.single_precision) lvl_tol = std::max(lvl_tol, 2e-6);
+        // coarse levels only need the pressure (for prolongation), so drop their
+        // displacement/gap unconditionally; the finest honours light_result.
+        const bool light = finest ? np.light_result : true;
 
         if (np.single_precision) {
             op.build_single_caches();
@@ -95,14 +98,16 @@ ContactResult solve_contact_nested(int Ns, double L, double E_star,
                     return fp.apply_single(g, contact);
                 };
             Eigen::VectorXf g0f = gap[li].cast<float>();
+            gap[li].resize(0); // free the double gap once cast to float
             Eigen::VectorXf p0f;
             if (have_init) p0f = p_init.cast<float>();
             res = solve_contact_impl<float>(
                 mvf, g0f, static_cast<float>(p_bar), static_cast<float>(lvl_tol),
-                max_iter, use_pr, pcf, have_init ? &p0f : nullptr);
+                max_iter, use_pr, pcf, have_init ? &p0f : nullptr, light);
         } else {
             res = solve_contact(mv, gap[li], p_bar, lvl_tol, max_iter, use_pr, pc,
-                                have_init ? &p_init : nullptr);
+                                have_init ? &p_init : nullptr, light);
+            gap[li].resize(0);
         }
 
         if (!finest) {

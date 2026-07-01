@@ -9,7 +9,7 @@ template <class Real>
 ContactResult solve_contact_impl(const MatVecT<Real>& S, const VecT<Real>& g0,
                                  Real p_bar, Real tol, int max_iter, bool use_pr,
                                  const PrecondT<Real>& precond,
-                                 const VecT<Real>* p_init) {
+                                 const VecT<Real>* p_init, bool light) {
     using Vec = VecT<Real>;
     const int N = static_cast<int>(g0.size());
     if (N == 0 || p_bar <= Real(0))
@@ -132,8 +132,10 @@ ContactResult solve_contact_impl(const MatVecT<Real>& S, const VecT<Real>& g0,
     alpha = nc ? gsum / nc : Real(0);
 
     res.pressure = p.template cast<double>();
-    res.displacement = u.template cast<double>();
-    res.gap = (g.array() - alpha).template cast<double>();
+    if (!light) {
+        res.displacement = u.template cast<double>();
+        res.gap = (g.array() - alpha).template cast<double>();
+    }
     res.approach = static_cast<double>(alpha);
     res.objective = static_cast<double>(Real(0.5) * p.dot(u) + p.dot(g0));
     res.iterations = it;
@@ -145,16 +147,17 @@ ContactResult solve_contact_impl(const MatVecT<Real>& S, const VecT<Real>& g0,
 // explicit instantiations
 template ContactResult solve_contact_impl<double>(
     const MatVecT<double>&, const VecT<double>&, double, double, int, bool,
-    const PrecondT<double>&, const VecT<double>*);
+    const PrecondT<double>&, const VecT<double>*, bool);
 template ContactResult solve_contact_impl<float>(
     const MatVecT<float>&, const VecT<float>&, float, float, int, bool,
-    const PrecondT<float>&, const VecT<float>*);
+    const PrecondT<float>&, const VecT<float>*, bool);
 
 ContactResult solve_contact(const MatVec& S, const Eigen::VectorXd& g0,
                             double p_bar, double tol, int max_iter, bool use_pr,
-                            const Precond& precond, const Eigen::VectorXd* p_init) {
+                            const Precond& precond, const Eigen::VectorXd* p_init,
+                            bool light) {
     return solve_contact_impl<double>(S, g0, p_bar, tol, max_iter, use_pr,
-                                      precond, p_init);
+                                      precond, p_init, light);
 }
 
 } // namespace hmc

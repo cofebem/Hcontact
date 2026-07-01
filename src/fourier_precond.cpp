@@ -8,22 +8,27 @@ namespace hmc {
 
 FourierPreconditioner::FourierPreconditioner(int Ns) : Ns_(Ns), w_(Ns, Ns) {
     // integer wavenumbers k = i (i < Ns/2) else i - Ns; symbol |k|, DC zeroed.
-    // Absolute scale is irrelevant (cancels in CG), so 2π/L is dropped.
+    // Absolute scale is irrelevant (cancels in CG), so 2π/L is dropped. The
+    // symbol is stored in float: integer |k| < Ns is exact in float for the
+    // grids used, and the float path multiplies with it directly.
     auto kof = [Ns](int i) { return (i < Ns / 2) ? i : i - Ns; };
     for (int ky = 0; ky < Ns; ++ky)
         for (int kx = 0; kx < Ns; ++kx)
-            w_(ky, kx) = std::hypot(static_cast<double>(kof(kx)),
-                                    static_cast<double>(kof(ky)));
-    w_(0, 0) = 0.0;
+            w_(ky, kx) = std::hypot(static_cast<float>(kof(kx)),
+                                    static_cast<float>(kof(ky)));
+    w_(0, 0) = 0.0f;
 }
 
-// 2D FFT by 1D transforms over rows then columns.
-static void fft2_fwd(Eigen::FFT<double>& fft, const Eigen::MatrixXd& in,
-                     Eigen::MatrixXcd& out) {
+// 2D FFT by 1D transforms over rows then columns (scalar-templated: S is the
+// real type, so the working buffers are double or float accordingly).
+template <class S>
+static void fft2_fwd(Eigen::FFT<S>& fft,
+                     const Eigen::Matrix<S, Eigen::Dynamic, Eigen::Dynamic>& in,
+                     Eigen::Matrix<std::complex<S>, Eigen::Dynamic, Eigen::Dynamic>& out) {
     const int n = static_cast<int>(in.rows());
-    Eigen::MatrixXcd tmp(n, n);
-    std::vector<double> rin(n);
-    std::vector<std::complex<double>> rout(n), cin(n), cout(n);
+    Eigen::Matrix<std::complex<S>, Eigen::Dynamic, Eigen::Dynamic> tmp(n, n);
+    std::vector<S> rin(n);
+    std::vector<std::complex<S>> rout(n), cin(n), cout(n);
     for (int r = 0; r < n; ++r) {
         for (int c = 0; c < n; ++c) rin[c] = in(r, c);
         fft.fwd(rout, rin);
@@ -36,12 +41,14 @@ static void fft2_fwd(Eigen::FFT<double>& fft, const Eigen::MatrixXd& in,
     }
 }
 
-static void fft2_inv(Eigen::FFT<double>& fft, const Eigen::MatrixXcd& in,
-                     Eigen::MatrixXd& out) {
+template <class S>
+static void fft2_inv(Eigen::FFT<S>& fft,
+                     const Eigen::Matrix<std::complex<S>, Eigen::Dynamic, Eigen::Dynamic>& in,
+                     Eigen::Matrix<S, Eigen::Dynamic, Eigen::Dynamic>& out) {
     const int n = static_cast<int>(in.rows());
-    Eigen::MatrixXcd tmp(n, n);
-    std::vector<std::complex<double>> cin(n), cout(n), rin(n);
-    std::vector<double> rout(n);
+    Eigen::Matrix<std::complex<S>, Eigen::Dynamic, Eigen::Dynamic> tmp(n, n);
+    std::vector<std::complex<S>> cin(n), cout(n), rin(n);
+    std::vector<S> rout(n);
     for (int c = 0; c < n; ++c) {
         for (int r = 0; r < n; ++r) cin[r] = in(r, c);
         fft.inv(cout, cin);
@@ -54,63 +61,51 @@ static void fft2_inv(Eigen::FFT<double>& fft, const Eigen::MatrixXcd& in,
     }
 }
 
-Eigen::VectorXd
-FourierPreconditioner::apply(const Eigen::VectorXd& g,
-                             const std::vector<std::uint8_t>& contact) const {
-    const int N = Ns_ * Ns_;
-    Eigen::MatrixXd R = Eigen::MatrixXd::Zero(Ns_, Ns_);
+// Scalar-templated preconditioner apply. w_ (float symbol) is used directly in
+// float and cast up in double.
+template <class S>
+static Eigen::Matrix<S, Eigen::Dynamic, 1>
+apply_t(int Ns, const Eigen::MatrixXf& wf,
+        const Eigen::Matrix<S, Eigen::Dynamic, 1>& g,
+        const std::vector<std::uint8_t>& contact) {
+    using Vec = Eigen::Matrix<S, Eigen::Dynamic, 1>;
+    using Mat = Eigen::Matrix<S, Eigen::Dynamic, Eigen::Dynamic>;
+    using CMat = Eigen::Matrix<std::complex<S>, Eigen::Dynamic, Eigen::Dynamic>;
+    const int N = Ns * Ns;
+    Mat R = Mat::Zero(Ns, Ns);
     for (int i = 0; i < N; ++i)
-        if (contact[i]) R(i / Ns_, i % Ns_) = g(i); // i = iy*Ns + ix
+        if (contact[i]) R(i / Ns, i % Ns) = g(i); // i = iy*Ns + ix
 
-    Eigen::FFT<double> fft;
-    Eigen::MatrixXcd C(Ns_, Ns_);
-    fft2_fwd(fft, R, C);
-    C.array() *= w_.array(); // real symbol
-    Eigen::MatrixXd Z(Ns_, Ns_);
-    fft2_inv(fft, C, Z);
+    Eigen::FFT<S> fft;
+    CMat C(Ns, Ns);
+    fft2_fwd<S>(fft, R, C);
+    C.array() *= wf.template cast<S>().array(); // real symbol
+    Mat Z(Ns, Ns);
+    fft2_inv<S>(fft, C, Z);
 
-    Eigen::VectorXd z = Eigen::VectorXd::Zero(N);
+    Vec z = Vec::Zero(N);
     double zsum = 0.0;
     int nc = 0;
     for (int i = 0; i < N; ++i)
-        if (contact[i]) { z(i) = Z(i / Ns_, i % Ns_); zsum += z(i); ++nc; }
+        if (contact[i]) { z(i) = Z(i / Ns, i % Ns); zsum += z(i); ++nc; }
     if (nc) {
-        const double zmean = zsum / nc;
+        const S zmean = static_cast<S>(zsum / nc);
         for (int i = 0; i < N; ++i)
             if (contact[i]) z(i) -= zmean;
     }
     return z;
 }
 
+Eigen::VectorXd
+FourierPreconditioner::apply(const Eigen::VectorXd& g,
+                             const std::vector<std::uint8_t>& contact) const {
+    return apply_t<double>(Ns_, w_, g, contact);
+}
+
 Eigen::VectorXf
 FourierPreconditioner::apply_single(const Eigen::VectorXf& g,
                                     const std::vector<std::uint8_t>& contact) const {
-    // The float residual is scattered into a double FFT (the transform is the
-    // memory-cheap part relative to the O(N) solver vectors); result cast back.
-    const int N = Ns_ * Ns_;
-    Eigen::MatrixXd R = Eigen::MatrixXd::Zero(Ns_, Ns_);
-    for (int i = 0; i < N; ++i)
-        if (contact[i]) R(i / Ns_, i % Ns_) = static_cast<double>(g(i));
-
-    Eigen::FFT<double> fft;
-    Eigen::MatrixXcd C(Ns_, Ns_);
-    fft2_fwd(fft, R, C);
-    C.array() *= w_.array();
-    Eigen::MatrixXd Z(Ns_, Ns_);
-    fft2_inv(fft, C, Z);
-
-    Eigen::VectorXf z = Eigen::VectorXf::Zero(N);
-    double zsum = 0.0;
-    int nc = 0;
-    for (int i = 0; i < N; ++i)
-        if (contact[i]) { z(i) = static_cast<float>(Z(i / Ns_, i % Ns_));
-                          zsum += z(i); ++nc; }
-    if (nc) {
-        const float zmean = static_cast<float>(zsum / nc);
-        for (int i = 0; i < N; ++i)
-            if (contact[i]) z(i) -= zmean;
-    }
-    return z;
+    return apply_t<float>(Ns_, w_, g, contact);
 }
 
 } // namespace hmc
